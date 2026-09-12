@@ -180,3 +180,25 @@ function bucketFor(
     label: STATE_LABEL[row.state],
   };
 }
+
+/**
+ * True when a branch name is bb's own generated worktree branch, which is the
+ * thread title slugified with the thread id stuck on the end. Showing one
+ * under the title restates the title in kebab-case and buries the branches
+ * that were actually named by a person.
+ */
+export function isGeneratedBranch(
+  branch: string | null,
+  threadId: string,
+): boolean {
+  if (branch === null) return true;
+  return branch.endsWith(`-${threadId}`) || branch.endsWith(`_${threadId}`);
+}
+
+/** The branch worth putting under a title, or null when there is none. */
+export function displayBranch(
+  branch: string | null,
+  threadId: string,
+): string | null {
+  return isGeneratedBranch(branch, threadId) ? null : branch;
+}

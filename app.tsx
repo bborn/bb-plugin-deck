@@ -36,7 +36,9 @@ import {
 import {
   DEFAULT_DISPLAY,
   GROUP_BY_LABEL,
+  parseDisplay,
   SORT_BY_LABEL,
+  displayBranch,
   cycleGroupBy,
   cycleSortBy,
   groupRows,
@@ -58,6 +60,36 @@ interface Row extends Matchable, Groupable {
   projectIconUrl: string | null;
   blockedOn: string | null;
 }
+
+/**
+ * Every key the Inbox binds, in one place. The overlay renders from this, so
+ * the cheatsheet cannot drift from the handler.
+ */
+const SHORTCUTS: { keys: string; does: string }[] = [
+  { keys: "↑ ↓  or  j k", does: "Move between threads" },
+  { keys: "⇧↑ ⇧↓", does: "Move, from inside the message box" },
+  { keys: "Tab", does: "Write: focus the message box" },
+  { keys: "Esc", does: "Back to the list" },
+  { keys: "/", does: "Search" },
+  { keys: "⏎", does: "Open the thread" },
+  { keys: "o", does: "Open it in a split" },
+  { keys: "e", does: "Archive" },
+  { keys: "u", does: "Undo the last archive" },
+  { keys: "p", does: "Pin or unpin" },
+  { keys: "m", does: "Mark read or unread" },
+  { keys: ".", does: "Open the pull request" },
+  { keys: "g", does: "Cycle grouping  (⌘⇧G anywhere)" },
+  { keys: "s", does: "Cycle sorting  (⌘⇧S anywhere)" },
+  { keys: "f", does: "Toggle unread first" },
+  { keys: "v", does: "Save this search as a view" },
+  { keys: "x", does: "Delete the view you are in" },
+  { keys: "1 - 9", does: "Jump to a saved view" },
+  { keys: "[ ]", does: "Narrow or widen the list  (\\ resets)" },
+  { keys: "←", does: "Up to the group header, then fold it" },
+  { keys: "→", does: "Unfold the group header you are on" },
+  { keys: "c", does: "Toggle the group you are in" },
+  { keys: "?", does: "This list" },
+];
 
 const SEARCH_PLACEHOLDER = "Find anything: ENG-482, #1284, a branch, [project]";
 
@@ -113,15 +145,52 @@ function relativeTime(at: number): string {
   return `${Math.round(days / 7)}w`;
 }
 
+interface InboxData {
+  meta: Meta[];
+  views: View[];
+  projects: Project[];
+  display: Display;
+}
+
+const CACHE_KEY = "bb-plugin-inbox:cache:1";
+const COLLAPSED_KEY = "bb-plugin-inbox:collapsed:1";
+
+/**
+ * The last payload, read synchronously so the very first paint already has
+ * project icons, saved views and the grouping. Without it the list renders
+ * once with initials and default grouping, then again a round trip later,
+ * which is the flicker.
+ */
+function readCache(): InboxData | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(CACHE_KEY);
+    if (raw == null) return null;
+    const parsed = JSON.parse(raw) as Partial<InboxData>;
+    if (!Array.isArray(parsed.projects)) return null;
+    return {
+      meta: Array.isArray(parsed.meta) ? parsed.meta : [],
+      views: Array.isArray(parsed.views) ? parsed.views : [],
+      projects: parsed.projects,
+      display: parseDisplay(parsed.display),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function useInbox() {
   const rpc = useRpc<typeof rpcContract>();
-  const [meta, setMeta] = useState<Meta[]>([]);
-  const [views, setViews] = useState<View[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [display, setDisplay] = useState<Display>(DEFAULT_DISPLAY);
+  const cached = useRef(readCache()).current;
+  const [meta, setMeta] = useState<Meta[]>(cached?.meta ?? []);
+  const [views, setViews] = useState<View[]>(cached?.views ?? []);
+  const [projects, setProjects] = useState<Project[]>(cached?.projects ?? []);
+  const [display, setDisplay] = useState<Display>(
+    cached?.display ?? DEFAULT_DISPLAY,
+  );
   // The server is authoritative until the first load lands; after that the
   // window owns its own display so a refetch cannot yank a setting back.
   const loaded = useRef(false);
+  const cacheKeyRef = useRef<string>("");
 
   const refetch = useCallback(() => {
     rpc.call("inbox_get").then(
@@ -132,6 +201,18 @@ function useInbox() {
         if (!loaded.current) {
           setDisplay(next.display);
           loaded.current = true;
+        }
+        // Only write when something actually moved, so a realtime signal does
+        // not churn storage on every keystroke elsewhere in the app.
+        const encoded = JSON.stringify(next);
+        if (encoded !== cacheKeyRef.current) {
+          cacheKeyRef.current = encoded;
+          try {
+            globalThis.localStorage?.setItem(CACHE_KEY, encoded);
+          } catch {
+            // A browser with storage off still works, just without the
+            // instant first paint.
+          }
         }
       },
       (cause: unknown) => {
@@ -184,7 +265,10 @@ function ProjectMark({ of, className }: { of: Marked; className?: string }) {
       <img
         src={of.projectIconUrl}
         alt=""
-        loading="lazy"
+        // Not lazy: these are a handful of tiny, immutably-cached images, and
+        // lazy decoding is exactly what makes them pop in after the rows.
+        loading="eager"
+        decoding="sync"
         onError={() => setBroken(true)}
         className={cn("size-4 shrink-0 rounded-[3px] object-contain", className)}
       />
@@ -231,17 +315,24 @@ function PullRequestBadge({ threadId }: { threadId: string }) {
 function ThreadRow({
   row,
   selected,
+  active,
   showProject,
   onSelect,
   onOpen,
 }: {
   row: Row;
   selected: boolean;
+  /** True when the list itself holds the caret. */
+  active: boolean;
   /** False under a project group, where the header already says which one. */
   showProject: boolean;
   onSelect: () => void;
   onOpen: () => void;
 }) {
+  // bb names a worktree branch after the thread, so most branches here are the
+  // title in kebab-case with the thread id on the end. Those say nothing the
+  // title has not; a branch someone chose does.
+  const shownBranch = displayBranch(row.branchName, row.threadId);
   return (
     <li>
       <div
@@ -252,29 +343,41 @@ function ThreadRow({
         onClick={onSelect}
         onDoubleClick={onOpen}
         className={cn(
-          "cursor-pointer px-3 py-2 text-sm",
-          selected ? "bg-muted" : "hover:bg-muted/50",
+          "cursor-pointer border-l-2 px-3 py-2.5 text-sm",
+          selected
+            ? active
+              ? "border-foreground bg-muted"
+              : "border-transparent bg-muted/50"
+            : "border-transparent hover:bg-muted/50",
         )}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
           {row.state === "needs-me" ? (
             <span
               aria-label="Needs you"
-              className="size-1.5 shrink-0 rounded-full bg-destructive"
+              className="size-2 shrink-0 rounded-full bg-destructive"
             />
           ) : row.state === "working" ? (
             <span
               aria-label="Working"
-              className="size-1.5 shrink-0 animate-pulse rounded-full bg-foreground"
+              className="size-2 shrink-0 animate-pulse rounded-full bg-foreground"
+            />
+          ) : row.isUnread ? (
+            <span
+              aria-label="Unread"
+              className="size-2 shrink-0 rounded-full bg-foreground"
             />
           ) : (
-            <span aria-hidden className="size-1.5 shrink-0" />
+            <span aria-hidden className="size-2 shrink-0" />
           )}
           <span
             className={cn(
               "min-w-0 flex-1 truncate",
-              row.isUnread && "font-medium",
-              row.state === "done" && "text-muted-foreground",
+              // Read rows recede and unread rows stay bright. Bolding the
+              // unread ones alone was too small a difference to see.
+              row.isUnread
+                ? "font-semibold text-foreground"
+                : "text-muted-foreground",
             )}
           >
             {row.title}
@@ -287,18 +390,18 @@ function ThreadRow({
             {relativeTime(row.updatedAt)}
           </span>
         </div>
-        {showProject || row.branchName !== null || row.tags.length > 0 ? (
-          <div className="mt-1 flex items-center gap-1.5 pl-3.5 text-xs text-muted-foreground">
+        {showProject || shownBranch !== null || row.tags.length > 0 ? (
+          <div className="mt-1.5 flex items-center gap-1.5 pl-[1.125rem] text-xs text-muted-foreground">
             {showProject ? (
               <>
                 <ProjectMark of={row} />
                 <span className="shrink-0">{row.projectName}</span>
-                {row.branchName === null ? null : <span aria-hidden>/</span>}
+                {shownBranch === null ? null : <span aria-hidden>/</span>}
               </>
             ) : null}
-            {row.branchName === null ? null : (
+            {shownBranch === null ? null : (
               <span className="truncate font-mono text-[11px]">
-                {row.branchName}
+                {shownBranch}
               </span>
             )}
             {row.tags.map((tag) => (
@@ -312,11 +415,11 @@ function ThreadRow({
           </div>
         ) : null}
         {row.blockedOn !== null ? (
-          <p className="mt-1 pl-3.5 text-xs text-destructive">
+          <p className="mt-1.5 pl-[1.125rem] text-xs text-destructive">
             Waiting on you: {row.blockedOn}
           </p>
         ) : row.note !== null ? (
-          <p className="mt-1 truncate pl-3.5 text-xs text-muted-foreground">
+          <p className="mt-1.5 truncate pl-[1.125rem] text-xs text-muted-foreground">
             {row.note}
           </p>
         ) : null}
@@ -541,12 +644,17 @@ function DisplayMenu({
 function ThreadPane({
   row,
   focusRequest,
+  onPullRequest,
 }: {
   row: Row | null;
   focusRequest: number;
+  onPullRequest: (url: string | null) => void;
 }) {
   const pullRequest = useSidebarThreadPullRequest(row?.threadId ?? "").pullRequest;
   const navigate = useBbNavigate();
+  useEffect(() => {
+    onPullRequest(pullRequest?.url ?? null);
+  }, [pullRequest, onPullRequest]);
 
   if (row === null) {
     return (
@@ -612,13 +720,38 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
   const [text, setText] = useState(() =>
     subPath === "" ? "" : decodeURIComponent(subPath),
   );
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The cursor walks headers AND rows, the way a tree does: a folded group has
+  // no rows to land on, so its header has to be a stop or you can never reopen
+  // it from the keyboard.
+  const [cursor, setCursor] = useState<
+    { kind: "group"; key: string } | { kind: "row"; threadId: string } | null
+  >(null);
   const [deepHits, setDeepHits] = useState<Hit[]>([]);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  // Which side holds the caret. Without a cue you cannot tell whether the next
+  // arrow key moves the list or edits a message.
+  const [focusSide, setFocusSide] = useState<"list" | "chat">("list");
+  // Collapsed group keys, per grouping mode: the groups you fold under "by
+  // project" are not the ones you fold under "by day".
+  const [collapsed, setCollapsed] = useState<Record<string, string[]>>(() => {
+    try {
+      const raw = globalThis.localStorage?.getItem(COLLAPSED_KEY);
+      return raw == null ? {} : (JSON.parse(raw) as Record<string, string[]>);
+    } catch {
+      return {};
+    }
+  });
+  /** Threads archived from here, newest last. `u` pops one back. */
+  const archived = useRef<string[]>([]);
+  /** The group the fold key last shut, so the unfold key can reopen it. */
+  const lastFolded = useRef<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   // Bumping this is how the host is asked to put the caret in the composer.
   const [focusRequest, setFocusRequest] = useState(0);
   const splitRef = useRef<HTMLDivElement>(null);
+  /** Filled by the pane, which is where the PR lookup already lives. */
+  const pullRequestUrl = useRef<string | null>(null);
   const { width, dragging, startDrag, clamp, commit } = useListWidth(splitRef);
   const navigate = useBbNavigate();
 
@@ -670,10 +803,37 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
     () => groupRows(matching, display),
     [matching, display],
   );
-  // The flat order the keyboard walks, which has to be the order on screen.
+
+  const folded = useMemo(
+    () => new Set(collapsed[display.groupBy] ?? []),
+    [collapsed, display.groupBy],
+  );
+  const toggleGroup = useCallback(
+    (key: string, force?: boolean) => {
+      setCollapsed((current) => {
+        const mode = display.groupBy;
+        const set = new Set(current[mode] ?? []);
+        const shut = force ?? !set.has(key);
+        if (shut) set.add(key);
+        else set.delete(key);
+        const next = { ...current, [mode]: [...set] };
+        try {
+          globalThis.localStorage?.setItem(COLLAPSED_KEY, JSON.stringify(next));
+        } catch {
+          // Folding still works for this session without storage.
+        }
+        return next;
+      });
+    },
+    [display.groupBy],
+  );
+
+  // The flat order the keyboard walks, which has to be the order on screen:
+  // a folded group's rows are not reachable with the arrow keys either.
   const visible = useMemo(
-    () => groups.flatMap((group) => group.rows),
-    [groups],
+    () =>
+      groups.flatMap((group) => (folded.has(group.key) ? [] : group.rows)),
+    [groups, folded],
   );
 
   // Deep search runs only when the local list comes up short, so the common
@@ -702,10 +862,55 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
     [deepHits, known],
   );
 
-  const selected = useMemo(
-    () => visible.find((row) => row.threadId === selectedId) ?? visible[0] ?? null,
-    [visible, selectedId],
+  /** Headers and their visible rows, in screen order: what the arrows walk. */
+  const navigable = useMemo(
+    () =>
+      groups.flatMap((group) => [
+        { kind: "group" as const, key: group.key },
+        ...(folded.has(group.key)
+          ? []
+          : group.rows.map((row) => ({ kind: "row" as const, row }))),
+      ]),
+    [groups, folded],
   );
+
+  const cursorAt = useMemo(() => {
+    const index = navigable.findIndex((item) =>
+      cursor === null
+        ? false
+        : item.kind === "group"
+          ? cursor.kind === "group" && item.key === cursor.key
+          : cursor.kind === "row" && item.row.threadId === cursor.threadId,
+    );
+    return index === -1 ? 0 : index;
+  }, [navigable, cursor]);
+
+  /**
+   * The thread the pane shows. It holds the last row the cursor was on, so
+   * stepping onto a group header does not blank the conversation beside it.
+   */
+  const [shownId, setShownId] = useState<string | null>(null);
+  const here = navigable[cursorAt];
+  useEffect(() => {
+    if (here?.kind === "row") setShownId(here.row.threadId);
+  }, [here]);
+  const selected = useMemo(
+    () =>
+      visible.find((row) => row.threadId === shownId) ??
+      (here?.kind === "row" ? here.row : null) ??
+      visible[0] ??
+      null,
+    [visible, shownId, here],
+  );
+  const cursorRow = here?.kind === "row" ? here.row : null;
+  const cursorGroup =
+    here?.kind === "group"
+      ? here.key
+      : here?.kind === "row"
+        ? groups.find((group) =>
+            group.rows.some((row) => row.threadId === here.row.threadId),
+          )?.key ?? null
+        : null;
 
   // Keep the URL in step so back/forward walks searches.
   const lastPushed = useRef(text);
@@ -723,18 +928,24 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
 
   const move = useCallback(
     (step: number) => {
-      if (visible.length === 0) return;
-      const at = visible.findIndex((row) => row.threadId === selected?.threadId);
-      const next = Math.min(Math.max(at + step, 0), visible.length - 1);
-      setSelectedId(visible[next]!.threadId);
-      document
-        .querySelector(`[data-thread="${visible[next]!.threadId}"]`)
-        ?.scrollIntoView({ block: "nearest" });
+      if (navigable.length === 0) return;
+      const next = Math.min(
+        Math.max(cursorAt + step, 0),
+        navigable.length - 1,
+      );
+      const item = navigable[next]!;
+      setCursor(
+        item.kind === "group"
+          ? { kind: "group", key: item.key }
+          : { kind: "row", threadId: item.row.threadId },
+      );
+      const id = item.kind === "group" ? `group-${item.key}` : `row-${item.row.threadId}`;
+      document.getElementById(id)?.scrollIntoView({ block: "nearest" });
     },
-    [visible, selected],
+    [navigable, cursorAt],
   );
 
-  const saveView = () => {
+  const saveView = useCallback(() => {
     const name = window.prompt("Name this view", "")?.trim();
     if (name === undefined || name === "") return;
     rpc.call("view_save", { name, query: text, display }).then(
@@ -746,7 +957,22 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         toast.error(cause instanceof Error ? cause.message : String(cause));
       },
     );
-  };
+  }, [rpc, text, display, setViews]);
+
+  const resizeList = useCallback(
+    (delta: number | null) => {
+      commit(clamp(delta === null ? LIST_WIDTH_DEFAULT : width + delta));
+    },
+    [clamp, commit, width],
+  );
+
+  const openPullRequest = useCallback(() => {
+    if (pullRequestUrl.current === null) {
+      toast("No pull request on this thread.");
+      return;
+    }
+    navigate.openUrl(pullRequestUrl.current);
+  }, [navigate]);
 
   const focusList = useCallback(() => {
     composerWanted.current = false;
@@ -799,6 +1025,13 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         }
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // Any key dismisses the cheatsheet, which is the only thing it should do
+      // while it is up.
+      if (sheetOpen) {
+        event.preventDefault();
+        setSheetOpen(false);
+        return;
+      }
 
       // Shift+arrows walk threads from ANYWHERE in the panel, including mid
       // sentence in the composer. That is the whole point: changing which
@@ -904,7 +1137,85 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         return;
       }
 
-      if (selected === null) return;
+      if (key === "?") {
+        event.preventDefault();
+        setSheetOpen(true);
+        return;
+      }
+      if (key === "ArrowLeft" || key === "ArrowRight" || key === "c") {
+        if (cursorGroup === null) return;
+        event.preventDefault();
+        if (key === "c") {
+          toggleGroup(cursorGroup);
+          setCursor({ kind: "group", key: cursorGroup });
+          return;
+        }
+        if (key === "ArrowRight") {
+          // On a folded header this opens it. Anywhere else there is nothing
+          // to the right, which is what a tree does too.
+          if (folded.has(cursorGroup)) toggleGroup(cursorGroup, false);
+          return;
+        }
+        // Left on a row climbs to its header, the way a tree does; left again
+        // folds it. Two presses, each one obvious.
+        if (cursorRow !== null) {
+          setCursor({ kind: "group", key: cursorGroup });
+          return;
+        }
+        toggleGroup(cursorGroup, true);
+        return;
+      }
+      if (key === "f") {
+        event.preventDefault();
+        const unreadFirst = !display.unreadFirst;
+        changeDisplay({ ...display, unreadFirst });
+        toast.success(unreadFirst ? "Unread first" : "Unread in order");
+        return;
+      }
+      if (key === "[" || key === "]" || key === "\\") {
+        event.preventDefault();
+        resizeList(key === "[" ? -48 : key === "]" ? 48 : null);
+        return;
+      }
+      if (key === "u") {
+        event.preventDefault();
+        const last = archived.current.pop();
+        if (last === undefined) {
+          toast("Nothing to undo.");
+          return;
+        }
+        rpc.call("thread_unarchive", { threadId: last }).then(
+          () => toast.success("Restored"),
+          () => toast.error("Could not restore that thread."),
+        );
+        return;
+      }
+      if (key === "v") {
+        event.preventDefault();
+        saveView();
+        return;
+      }
+      if (key === "x") {
+        event.preventDefault();
+        const applied = views.find((view) => view.query === text);
+        if (applied === undefined) {
+          toast("You are not in a saved view.");
+          return;
+        }
+        rpc.call("view_delete", { id: applied.id }).then(
+          (next) => {
+            setViews(next.views);
+            toast.success(`Deleted "${applied.name}"`);
+          },
+          () => toast.error("Could not delete that view."),
+        );
+        return;
+      }
+
+      // Row actions need a row under the cursor, not merely something shown in
+      // the pane: pressing archive on a group header should do nothing.
+      if (cursorRow === null) return;
+      const selected = cursorRow;
       if (key === "Enter") {
         event.preventDefault();
         actions.open(selected.threadId);
@@ -913,18 +1224,51 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         actions.open(selected.threadId, { split: true });
       } else if (key === "e") {
         event.preventDefault();
-        // The host archives and raises its own undo toast. Do not add a second
-        // one: one keystroke should produce one notice, and the host's is the
-        // affordance the rest of bb already taught.
+        // The host archives and raises its own undo toast; `u` is the keyboard
+        // path to the same thing, which is why the id goes on a stack here.
+        archived.current.push(selected.threadId);
         actions.archive(selected.threadId);
       } else if (key === "p") {
         event.preventDefault();
         void actions.setPinned(selected.threadId, !selected.isPinned);
+      } else if (key === "m") {
+        event.preventDefault();
+        const read = selected.isUnread;
+        rpc
+          .call("thread_read", { threadId: selected.threadId, read })
+          .then(
+            () => toast.success(read ? "Marked read" : "Marked unread"),
+            () => toast.error("Could not change that."),
+          );
+      } else if (key === ".") {
+        event.preventDefault();
+        openPullRequest();
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [move, selected, actions, views, text, display, changeDisplay, focusList, focusComposer]);
+  }, [
+    move,
+    selected,
+    actions,
+    views,
+    text,
+    display,
+    changeDisplay,
+    focusList,
+    focusComposer,
+    rpc,
+    setViews,
+    saveView,
+    sheetOpen,
+    resizeList,
+    openPullRequest,
+    groups,
+    folded,
+    toggleGroup,
+    cursorRow,
+    cursorGroup,
+  ]);
 
   // A project group names its project once, in the header, so the rows under it
   // stop repeating it.
@@ -944,8 +1288,13 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
   return (
     <div
       ref={splitRef}
+      onFocusCapture={(event) => {
+        setFocusSide(
+          listRef.current?.contains(event.target as Node) ? "list" : "chat",
+        );
+      }}
       className={cn(
-        "flex h-full min-h-0 flex-1",
+        "relative flex h-full min-h-0 flex-1",
         // Killing selection while dragging stops the pointer from painting the
         // list blue as it crosses rows.
         dragging && "select-none",
@@ -953,7 +1302,12 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
     >
       <div
         style={{ width }}
-        className="flex min-h-0 shrink-0 flex-col"
+        className={cn(
+          "flex min-h-0 shrink-0 flex-col transition-colors",
+          // The side without the caret recedes a hair. Subtle on purpose: it
+          // has to be readable at a glance, not a spotlight.
+          focusSide === "list" ? "bg-background" : "bg-muted/20",
+        )}
       >
         <div className="space-y-2 border-b border-border px-3 py-2.5">
           <div className="flex items-center gap-1">
@@ -1023,13 +1377,38 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
           tabIndex={0}
           aria-label="Threads"
           aria-activedescendant={
-            selected === null ? undefined : `row-${selected.threadId}`
+            here === undefined
+              ? undefined
+              : here.kind === "group"
+                ? `group-${here.key}`
+                : `row-${here.row.threadId}`
           }
           className="min-h-0 flex-1 overflow-y-auto outline-none"
         >
           {groups.map((group) => (
             <div key={group.key}>
-              <li className="sticky top-0 z-10 flex items-center gap-1.5 bg-card/95 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground backdrop-blur">
+              <li
+                role="button"
+                tabIndex={-1}
+                id={`group-${group.key}`}
+                onClick={() => {
+                  toggleGroup(group.key);
+                  setCursor({ kind: "group", key: group.key });
+                }}
+                className={cn(
+                  "sticky top-0 z-10 mt-1 flex cursor-pointer select-none items-center gap-1.5 border-l-2 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide backdrop-blur hover:text-foreground",
+                  here?.kind === "group" && here.key === group.key
+                    ? focusSide === "list"
+                      ? "border-foreground bg-muted text-foreground"
+                      : "border-transparent bg-muted/50 text-foreground"
+                    : "border-transparent bg-card/95 text-muted-foreground",
+                )}
+              >
+                <Icon
+                  name={folded.has(group.key) ? "ChevronRight" : "ChevronDown"}
+                  className="size-3 shrink-0"
+                  aria-hidden
+                />
                 {/* Only real project buckets carry a mark. "Pinned" is a
                     group under every grouping, and stamping it with whichever
                     project happened to sort first would be a lie. */}
@@ -1041,13 +1420,14 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
                   {group.rows.length}
                 </span>
               </li>
-              {group.rows.map((row) => (
+              {(folded.has(group.key) ? [] : group.rows).map((row) => (
                 <div key={row.threadId} data-thread={row.threadId}>
                   <ThreadRow
                     row={row}
-                    selected={selected?.threadId === row.threadId}
+                    selected={cursorRow?.threadId === row.threadId}
+                    active={focusSide === "list"}
                     showProject={!byProject}
-                    onSelect={() => setSelectedId(row.threadId)}
+                    onSelect={() => setCursor({ kind: "row", threadId: row.threadId })}
                     onOpen={() => actions.open(row.threadId)}
                   />
                 </div>
@@ -1093,8 +1473,8 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
           <kbd className="font-mono">/</kbd> find ·{" "}
           <kbd className="font-mono">⏎</kbd> open ·{" "}
           <kbd className="font-mono">e</kbd> done ·{" "}
-          <kbd className="font-mono">⌘⇧g</kbd> group ·{" "}
-          <kbd className="font-mono">⌘⇧s</kbd> sort
+          <kbd className="font-mono">u</kbd> undo ·{" "}
+          <kbd className="font-mono">?</kbd> all keys
         </div>
       </div>
 
@@ -1106,8 +1486,21 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         onReset={() => commit(clamp(LIST_WIDTH_DEFAULT))}
       />
 
-      <div className="min-h-0 flex-1">
-        <ThreadPane row={selected} focusRequest={focusRequest} />
+      {sheetOpen ? <ShortcutSheet onClose={() => setSheetOpen(false)} /> : null}
+
+      <div
+        className={cn(
+          "min-h-0 flex-1 transition-colors",
+          focusSide === "chat" ? "bg-background" : "bg-muted/20",
+        )}
+      >
+        <ThreadPane
+          row={selected}
+          focusRequest={focusRequest}
+          onPullRequest={(url) => {
+            pullRequestUrl.current = url;
+          }}
+        />
       </div>
     </div>
   );
@@ -1235,6 +1628,34 @@ function PaneHandle({
       )}
       title="Drag to resize, double-click to reset"
     />
+  );
+}
+
+function ShortcutSheet({ onClose }: { onClose: () => void }) {
+  return (
+    <div
+      role="dialog"
+      aria-label="Keyboard shortcuts"
+      onClick={onClose}
+      className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 p-6 backdrop-blur-sm"
+    >
+      <div className="max-h-full w-full max-w-md overflow-y-auto rounded-lg border border-border bg-card p-4 shadow-lg">
+        <p className="mb-3 text-sm font-medium">Keyboard</p>
+        <dl className="space-y-1.5">
+          {SHORTCUTS.map((shortcut) => (
+            <div key={shortcut.keys} className="flex items-baseline gap-3 text-sm">
+              <dt className="w-32 shrink-0 font-mono text-xs text-muted-foreground">
+                {shortcut.keys}
+              </dt>
+              <dd className="min-w-0 flex-1">{shortcut.does}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-3 text-xs text-muted-foreground">
+          Any key closes this.
+        </p>
+      </div>
+    </div>
   );
 }
 

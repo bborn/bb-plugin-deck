@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_DISPLAY,
+  displayBranch,
+  isGeneratedBranch,
   cycleGroupBy,
   cycleSortBy,
   dayBucket,
@@ -223,4 +225,32 @@ test("cycling sort visits every option and wraps", () => {
     seen.push(at);
   }
   assert.deepEqual(seen, ["created", "alphabetical", "updated"]);
+});
+
+test("bb's generated worktree branches are not worth showing", () => {
+  // Real shapes: the title slugified, with the thread id on the end.
+  assert.equal(
+    isGeneratedBranch("bb/daily-sdr-scan-thr_duri4gwtm3", "thr_duri4gwtm3"),
+    true,
+  );
+  assert.equal(
+    isGeneratedBranch("bb/checkout-3555-skip-the-turn-it-thr_jj6qgcfcqk", "thr_jj6qgcfcqk"),
+    true,
+  );
+  assert.equal(isGeneratedBranch(null, "thr_x"), true);
+});
+
+test("a branch a person named survives", () => {
+  assert.equal(
+    isGeneratedBranch("docs/deploy-watch-prod-logging-notes", "thr_duri4gwtm3"),
+    false,
+  );
+  assert.equal(isGeneratedBranch("main", "thr_x"), false);
+  assert.equal(isGeneratedBranch("dana/eng-482-webhook-retry", "thr_x"), false);
+});
+
+test("displayBranch keeps only the informative ones", () => {
+  assert.equal(displayBranch("bb/thing-thr_abc", "thr_abc"), null);
+  assert.equal(displayBranch("main", "thr_abc"), "main");
+  assert.equal(displayBranch(null, "thr_abc"), null);
 });

@@ -92,6 +92,15 @@ export const rpcContract = defineRpcContract({
       display: displaySchema,
     }),
   },
+  // Archiving is one keystroke, so undo has to be one too.
+  thread_unarchive: {
+    input: z.object({ threadId: z.string() }),
+    output: z.object({ restored: z.boolean() }),
+  },
+  thread_read: {
+    input: z.object({ threadId: z.string(), read: z.boolean() }),
+    output: z.object({ read: z.boolean() }),
+  },
   tag_toggle: {
     input: z.object({
       threadId: z.string(),
@@ -588,6 +597,19 @@ export default async function plugin(bb: BbPluginApi) {
       // No realtime publish: the window that changed it already has it, and
       // republishing would make every other open inbox jump under the user.
       return next;
+    },
+
+    thread_unarchive: async ({ threadId }) => {
+      await bb.sdk.threads.unarchive({ threadId });
+      bb.realtime.publish(INBOX_CHANGED, { threadId });
+      return { restored: true };
+    },
+
+    thread_read: async ({ threadId, read }) => {
+      if (read) await bb.sdk.threads.markRead({ threadId });
+      else await bb.sdk.threads.markUnread({ threadId });
+      bb.realtime.publish(INBOX_CHANGED, { threadId });
+      return { read };
     },
 
     tag_toggle: ({ threadId, tag }) => {
