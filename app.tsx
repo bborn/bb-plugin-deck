@@ -37,6 +37,8 @@ import {
   DEFAULT_DISPLAY,
   GROUP_BY_LABEL,
   SORT_BY_LABEL,
+  cycleGroupBy,
+  cycleSortBy,
   groupRows,
   type Display,
   type GroupBy,
@@ -473,8 +475,9 @@ function DisplayMenu({
           sideOffset={6}
           className="z-50 min-w-52 rounded-lg border border-border bg-card p-1 shadow-md"
         >
-          <DropdownMenu.Label className="px-2 py-1 text-xs text-muted-foreground">
-            Organize
+          <DropdownMenu.Label className="flex items-center justify-between px-2 py-1 text-xs text-muted-foreground">
+            <span>Organize</span>
+            <kbd className="font-mono text-[10px]">⌘⇧G</kbd>
           </DropdownMenu.Label>
           {(Object.keys(GROUP_BY_LABEL) as GroupBy[]).map((option) => (
             <DropdownMenu.Item
@@ -493,8 +496,9 @@ function DisplayMenu({
           ))}
 
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
-          <DropdownMenu.Label className="px-2 py-1 text-xs text-muted-foreground">
-            Sort by
+          <DropdownMenu.Label className="flex items-center justify-between px-2 py-1 text-xs text-muted-foreground">
+            <span>Sort by</span>
+            <kbd className="font-mono text-[10px]">⌘⇧S</kbd>
           </DropdownMenu.Label>
           {(Object.keys(SORT_BY_LABEL) as SortBy[]).map((option) => (
             <DropdownMenu.Item
@@ -766,6 +770,26 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      // Organize and sort are on mod+shift so they still land while you are
+      // typing. Both chords are unbound in bb, checked against
+      // `bb settings keyboard list`.
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
+        const letter = event.key.toLowerCase();
+        if (letter === "g") {
+          event.preventDefault();
+          const groupBy = cycleGroupBy(display.groupBy);
+          changeDisplay({ ...display, groupBy });
+          toast.success(GROUP_BY_LABEL[groupBy]);
+          return;
+        }
+        if (letter === "s") {
+          event.preventDefault();
+          const sortBy = cycleSortBy(display.sortBy);
+          changeDisplay({ ...display, sortBy });
+          toast.success(SORT_BY_LABEL[sortBy]);
+          return;
+        }
+      }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
       // Shift+arrows walk threads from ANYWHERE in the panel, including mid
@@ -827,6 +851,18 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         searchRef.current?.select();
         return;
       }
+      if (key === "g" || key === "s") {
+        event.preventDefault();
+        const next =
+          key === "g"
+            ? { ...display, groupBy: cycleGroupBy(display.groupBy) }
+            : { ...display, sortBy: cycleSortBy(display.sortBy) };
+        changeDisplay(next);
+        toast.success(
+          key === "g" ? GROUP_BY_LABEL[next.groupBy] : SORT_BY_LABEL[next.sortBy],
+        );
+        return;
+      }
       if (key === "j" || key === "ArrowDown") {
         event.preventDefault();
         move(1);
@@ -877,7 +913,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [move, selected, actions, views, text, changeDisplay, focusList, focusComposer]);
+  }, [move, selected, actions, views, text, display, changeDisplay, focusList, focusComposer]);
 
   // A project group names its project once, in the header, so the rows under it
   // stop repeating it.
@@ -1046,7 +1082,8 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
           <kbd className="font-mono">/</kbd> find ·{" "}
           <kbd className="font-mono">⏎</kbd> open ·{" "}
           <kbd className="font-mono">e</kbd> done ·{" "}
-          <kbd className="font-mono">p</kbd> pin
+          <kbd className="font-mono">⌘⇧g</kbd> group ·{" "}
+          <kbd className="font-mono">⌘⇧s</kbd> sort
         </div>
       </div>
 

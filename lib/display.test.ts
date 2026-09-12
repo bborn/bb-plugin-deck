@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_DISPLAY,
+  cycleGroupBy,
+  cycleSortBy,
   dayBucket,
   groupRows,
   parseDisplay,
@@ -201,4 +203,24 @@ test("grouping never drops or duplicates a row", () => {
       .sort();
     assert.deepEqual(seen, ["a", "b", "c", "d"], groupBy);
   }
+});
+
+test("cycling grouping visits every option and wraps", () => {
+  const seen = [];
+  let at = DEFAULT_DISPLAY.groupBy;
+  for (let step = 0; step < 4; step += 1) {
+    at = cycleGroupBy(at);
+    seen.push(at);
+  }
+  assert.deepEqual(seen, ["project", "day", "none", "state"]);
+});
+
+test("cycling sort visits every option and wraps", () => {
+  const seen = [];
+  let at = DEFAULT_DISPLAY.sortBy;
+  for (let step = 0; step < 3; step += 1) {
+    at = cycleSortBy(at);
+    seen.push(at);
+  }
+  assert.deepEqual(seen, ["created", "alphabetical", "updated"]);
 });

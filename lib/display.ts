@@ -35,6 +35,20 @@ export const SORT_BY_LABEL: Record<SortBy, string> = {
   alphabetical: "Alphabetical",
 };
 
+const GROUP_BY_CYCLE: GroupBy[] = ["state", "project", "day", "none"];
+const SORT_BY_CYCLE: SortBy[] = ["updated", "created", "alphabetical"];
+
+/** Step to the next option, wrapping. Cycling beats a menu for a keystroke. */
+export function cycleGroupBy(current: GroupBy): GroupBy {
+  const at = GROUP_BY_CYCLE.indexOf(current);
+  return GROUP_BY_CYCLE[(at + 1) % GROUP_BY_CYCLE.length]!;
+}
+
+export function cycleSortBy(current: SortBy): SortBy {
+  const at = SORT_BY_CYCLE.indexOf(current);
+  return SORT_BY_CYCLE[(at + 1) % SORT_BY_CYCLE.length]!;
+}
+
 /** Parse anything persisted or typed, falling back rather than throwing. */
 export function parseDisplay(value: unknown): Display {
   if (typeof value !== "object" || value === null) return DEFAULT_DISPLAY;

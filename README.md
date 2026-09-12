@@ -70,6 +70,11 @@ do not teach different words for the same idea.
 | --- | --- | --- |
 | By state (default), By project, By day, Flat | Updated at (default), Created at, Alphabetical | Show unread first |
 
+`⌘⇧G` and `⌘⇧S` cycle these without opening the menu, and they work while the
+caret is in the composer, which is where it usually is. Both chords are unbound
+in bb, checked against `bb settings keyboard list`. Each change raises a toast
+naming the new mode, since the grouping you just changed may be off screen.
+
 Pinned threads always lead, in their own group. Pinning is a deliberate act,
 and scattering pins through a project or day grouping would make the act
 pointless. The menu stays open while you click, so trying two groupings is one
@@ -109,6 +114,8 @@ dropped you into someone else's grouping would be a bug waiting to happen.
 | `r` | Jump to the reply box. `⌘↩` sends. |
 | `e` | Archive. |
 | `p` | Pin. |
+| `⌘⇧G` `⌘⇧S` | Cycle Organize / Sort by. Works while typing. |
+| `g` `s` | The same, when the list has focus. |
 | `1`-`9` | Saved views. |
 | `Escape` | Clear the search, then leave the field. |
 
