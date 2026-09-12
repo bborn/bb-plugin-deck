@@ -3,6 +3,8 @@
 **Inbox** for BB: one searchable list of every thread, with bb's own thread
 view beside it, so a context switch costs a keystroke instead of a navigation.
 
+![The Inbox: one list of every thread, grouped by what needs you, with the thread itself beside it](docs/screenshots/inbox.png)
+
 - `server.ts` — tags, the agent's standing note, saved views, deep search, and
   project icons.
 - `app.tsx` — the Inbox page: the list, and bb's `ThreadChat` in the pane.
@@ -127,6 +129,8 @@ the list and the composer, and two keys move between them.
 | `[` `]` `\` | Narrow, widen, reset the split. |
 | `?` | Every key, rendered from your own bindings. |
 
+![The keyboard sheet, rendered from your own bindings](docs/screenshots/keyboard.png)
+
 **These are defaults, not rules.** Every action is rebindable from the plugin
 settings: Add key, press the chord, click a chord to drop it, reset one at a
 time.
@@ -199,6 +203,8 @@ as `inbox`, so `task_note` and `task_tag` rows in a transcript carry the same
 mark.
 
 ## Settings
+
+![Settings: project marks, saved views, and the binding editor](docs/screenshots/settings.png)
 
 The plugin's settings page (Settings, then Installed plugins, then Inbox) is a
 real page, not a text field:
