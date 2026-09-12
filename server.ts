@@ -18,6 +18,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { hueForSlot } from "./lib/project-visuals.ts";
 import { DEFAULT_DISPLAY, parseDisplay, type Display } from "./lib/display.ts";
+import { resolveBindings, type Bindings } from "./lib/bindings.ts";
 import {
   ICON_CANDIDATES,
   isSafeRelativePath,
@@ -96,6 +97,8 @@ export const rpcContract = defineRpcContract({
       views: z.array(viewSchema),
       projects: z.array(projectSchema),
       display: displaySchema,
+      /** Action id to chords. Anything missing falls back to the default. */
+      bindings: z.record(z.string(), z.array(z.string())),
     }),
   },
   // Archiving is one keystroke, so undo has to be one too.
@@ -118,6 +121,14 @@ export const rpcContract = defineRpcContract({
   search_deep: {
     input: z.object({ text: z.string().trim().min(2).max(200) }),
     output: z.object({ hits: z.array(hitSchema) }),
+  },
+  bindings_set: {
+    input: z.object({
+      bindings: z.record(z.string(), z.array(z.string().max(40)).max(4)),
+    }),
+    output: z.object({
+      bindings: z.record(z.string(), z.array(z.string())),
+    }),
   },
   display_set: {
     input: displaySchema,
@@ -361,6 +372,11 @@ export default async function plugin(bb: BbPluginApi) {
    */
   async function readDisplay(): Promise<Display> {
     return parseDisplay(await bb.storage.kv.get("display"));
+  }
+
+  /** Key bindings, merged over the defaults so a partial map is fine. */
+  async function readBindings(): Promise<Bindings> {
+    return resolveBindings(await bb.storage.kv.get("bindings"));
   }
 
   // --- Project identity ---------------------------------------------------
@@ -610,7 +626,15 @@ export default async function plugin(bb: BbPluginApi) {
       views: listViews(),
       projects: await readProjects(),
       display: await readDisplay(),
+      bindings: await readBindings(),
     }),
+
+    bindings_set: async ({ bindings }) => {
+      const merged = resolveBindings(bindings);
+      await bb.storage.kv.set("bindings", merged);
+      bb.realtime.publish(INBOX_CHANGED, { bindings: true });
+      return { bindings: merged };
+    },
 
     display_set: async (next) => {
       await bb.storage.kv.set("display", next);

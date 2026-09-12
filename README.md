@@ -106,29 +106,37 @@ dropped you into someone else's grouping would be a bug waiting to happen.
 
 ## Keys
 
+You should never have to touch the mouse. Focus lives in one of two places,
+the list and the composer, and two keys move between them.
+
 | Key | Does |
 | --- | --- |
-| `/` | Jump to search. Arrows still move the list from inside the box. |
-| `j` `k` or arrows | Move. |
-| `Enter` | Open the thread. `o` opens it in a split. |
-| `r` | Jump to the reply box. `⌘↩` sends. |
-| `e` | Archive. |
-| `p` | Pin. |
-| `⌘⇧G` `⌘⇧S` | Cycle Organize / Sort by. Works while typing. |
-| `g` `s` | The same, when the list has focus. |
-| `1`-`9` | Saved views. |
-| `Escape` | Clear the search, then leave the field. |
+| `Tab` | Write. Puts the caret in the thread's composer. |
+| `Esc` | Back to the list. |
+| `↑` `↓` or `j` `k` | Move. `⇧↑` `⇧↓` do it from inside the composer. |
+| `←` `→` `c` | Up to the group header, fold, unfold, toggle. |
+| `/` | Search. Arrows still move the list from inside the box. |
+| `⏎` `o` | Open the thread, or open it in a split. |
+| `e` `u` `p` `m` `.` | Archive, undo, pin, read/unread, open the PR. |
+| `g` `s` `f` | Cycle grouping, cycle sorting, unread first. `⌘⇧G` and `⌘⇧S` also work while typing. |
+| `v` `x` `1`-`9` | Save a view, delete the view you are in, jump to one. |
+| `[` `]` `\` | Narrow, widen, reset the split. |
+| `?` | Every key, rendered from your own bindings. |
 
-The split between the list and the context pane is draggable, and remembered.
-Focus the divider and use the arrow keys (hold shift for a bigger step), or
-double-click it, or press Home, to reset. The width clamps so the list never
-drops under 280px and the context pane always keeps 360px, and it re-clamps
-when the window shrinks. It lives in `localStorage`, not plugin storage, on
-purpose: the right split depends on the screen you are at, so a laptop should
-not inherit a monitor's layout.
+**These are defaults, not rules.** Every action is rebindable from the plugin
+settings: Add key, press the chord, click a chord to drop it, reset one at a
+time.
 
-Inbox-wide keys work with nothing selected, which is exactly when you need them:
-a search that matches nothing still has to let you press Escape or a view key.
+A chord's scope comes from the chord rather than the action. A bare key fires
+only while the list has focus, because anywhere else it would type a character;
+anything carrying a modifier is safe mid-sentence. Escape is the exception both
+ways, since it types nothing and a text field ignores it. That rule is why
+`⌘⇧G` reaches you mid-message and `g` does not.
+
+The cursor walks group headers as well as rows. A folded group has no rows to
+land on, so its header has to be a stop, or you could never reopen it without
+the mouse.
+
 
 ## Agent tools
 

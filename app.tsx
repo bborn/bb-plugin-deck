@@ -47,6 +47,17 @@ import {
   type Groupable,
   type SortBy,
 } from "@/lib/display";
+import {
+  ACTIONS,
+  DEFAULT_BINDINGS,
+  encodeChord,
+  formatChord,
+  isReserved,
+  lookup,
+  resolveBindings,
+  type ActionId,
+  type Bindings,
+} from "@/lib/bindings";
 import { colorForHue, projectInitials } from "@/lib/project-visuals";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
@@ -60,36 +71,6 @@ interface Row extends Matchable, Groupable {
   projectIconUrl: string | null;
   blockedOn: string | null;
 }
-
-/**
- * Every key the Inbox binds, in one place. The overlay renders from this, so
- * the cheatsheet cannot drift from the handler.
- */
-const SHORTCUTS: { keys: string; does: string }[] = [
-  { keys: "↑ ↓  or  j k", does: "Move between threads" },
-  { keys: "⇧↑ ⇧↓", does: "Move, from inside the message box" },
-  { keys: "Tab", does: "Write: focus the message box" },
-  { keys: "Esc", does: "Back to the list" },
-  { keys: "/", does: "Search" },
-  { keys: "⏎", does: "Open the thread" },
-  { keys: "o", does: "Open it in a split" },
-  { keys: "e", does: "Archive" },
-  { keys: "u", does: "Undo the last archive" },
-  { keys: "p", does: "Pin or unpin" },
-  { keys: "m", does: "Mark read or unread" },
-  { keys: ".", does: "Open the pull request" },
-  { keys: "g", does: "Cycle grouping  (⌘⇧G anywhere)" },
-  { keys: "s", does: "Cycle sorting  (⌘⇧S anywhere)" },
-  { keys: "f", does: "Toggle unread first" },
-  { keys: "v", does: "Save this search as a view" },
-  { keys: "x", does: "Delete the view you are in" },
-  { keys: "1 - 9", does: "Jump to a saved view" },
-  { keys: "[ ]", does: "Narrow or widen the list  (\\ resets)" },
-  { keys: "←", does: "Up to the group header, then fold it" },
-  { keys: "→", does: "Unfold the group header you are on" },
-  { keys: "c", does: "Toggle the group you are in" },
-  { keys: "?", does: "This list" },
-];
 
 const SEARCH_PLACEHOLDER = "Find anything: ENG-482, #1284, a branch, [project]";
 
@@ -150,6 +131,7 @@ interface InboxData {
   views: View[];
   projects: Project[];
   display: Display;
+  bindings: Bindings;
 }
 
 const CACHE_KEY = "bb-plugin-inbox:cache:1";
@@ -172,6 +154,7 @@ function readCache(): InboxData | null {
       views: Array.isArray(parsed.views) ? parsed.views : [],
       projects: parsed.projects,
       display: parseDisplay(parsed.display),
+      bindings: resolveBindings(parsed.bindings),
     };
   } catch {
     return null;
@@ -187,6 +170,9 @@ function useInbox() {
   const [display, setDisplay] = useState<Display>(
     cached?.display ?? DEFAULT_DISPLAY,
   );
+  const [bindings, setBindings] = useState<Bindings>(
+    cached?.bindings ?? DEFAULT_BINDINGS,
+  );
   // The server is authoritative until the first load lands; after that the
   // window owns its own display so a refetch cannot yank a setting back.
   const loaded = useRef(false);
@@ -198,6 +184,7 @@ function useInbox() {
         setMeta(next.meta);
         setViews(next.views);
         setProjects(next.projects);
+        setBindings(resolveBindings(next.bindings));
         if (!loaded.current) {
           setDisplay(next.display);
           loaded.current = true;
@@ -240,6 +227,7 @@ function useInbox() {
     views,
     projects,
     display,
+    bindings,
     changeDisplay,
     setViews,
     refetch,
@@ -715,7 +703,7 @@ function ThreadPane({
 function InboxPage({ subPath }: PluginNavPanelProps) {
   const { threads, projects: hostProjects } = useSidebarThreads();
   const actions = useSidebarThreadActions();
-  const { rpc, meta, views, projects, display, changeDisplay, setViews } =
+  const { rpc, meta, views, projects, display, bindings, changeDisplay, setViews } =
     useInbox();
   const [text, setText] = useState(() =>
     subPath === "" ? "" : decodeURIComponent(subPath),
@@ -1004,25 +992,23 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      // Organize and sort are on mod+shift so they still land while you are
-      // typing. Both chords are unbound in bb, checked against
-      // `bb settings keyboard list`.
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
-        const letter = event.key.toLowerCase();
-        if (letter === "g") {
-          event.preventDefault();
-          const groupBy = cycleGroupBy(display.groupBy);
-          changeDisplay({ ...display, groupBy });
-          toast.success(GROUP_BY_LABEL[groupBy]);
-          return;
-        }
-        if (letter === "s") {
-          event.preventDefault();
-          const sortBy = cycleSortBy(display.sortBy);
-          changeDisplay({ ...display, sortBy });
-          toast.success(SORT_BY_LABEL[sortBy]);
-          return;
-        }
+      const chord = encodeChord(event);
+      const globalAction = lookup(bindings, chord, "global");
+
+      // Chords that type nothing work everywhere, including mid sentence.
+      if (globalAction === "group-cycle") {
+        event.preventDefault();
+        const groupBy = cycleGroupBy(display.groupBy);
+        changeDisplay({ ...display, groupBy });
+        toast.success(GROUP_BY_LABEL[groupBy]);
+        return;
+      }
+      if (globalAction === "sort-cycle") {
+        event.preventDefault();
+        const sortBy = cycleSortBy(display.sortBy);
+        changeDisplay({ ...display, sortBy });
+        toast.success(SORT_BY_LABEL[sortBy]);
+        return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       // Any key dismisses the cheatsheet, which is the only thing it should do
@@ -1039,13 +1025,12 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
       const typing = isTypingTarget(event.target);
       const inSearch = event.target === searchRef.current;
 
-      // Shift+arrows reach the list from inside the composer, and land you
-      // back in the list rather than holding the caret. Keeping the caret in
-      // the composer was tried and it steals the plain arrow keys: once you
-      // are navigating, navigation is what the arrows should do.
-      if (event.shiftKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      // A global move chord reaches the list from inside the composer, and
+      // lands you back in the list rather than holding the caret: once you are
+      // navigating, navigation is what the arrows should do.
+      if (globalAction === "move-down" || globalAction === "move-up") {
         event.preventDefault();
-        move(event.key === "ArrowDown" ? 1 : -1);
+        move(globalAction === "move-down" ? 1 : -1);
         if (typing) focusList();
         return;
       }
@@ -1053,66 +1038,67 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
       if (typing) {
         // Tab from the search box continues into the composer rather than
         // walking the browser's focus order through every control.
-        if (inSearch && event.key === "Tab" && !event.shiftKey) {
+        if (inSearch && lookup(bindings, chord, "list") === "write") {
           event.preventDefault();
           focusComposer();
           return;
         }
         // Escape anywhere you are typing comes back to the list, which is the
         // one key that always gets you home.
-        if (event.key === "Escape" && !inSearch) {
+        if (globalAction === "list" && !inSearch) {
           event.preventDefault();
           focusList();
           return;
         }
-        if (
-          inSearch &&
-          (event.key === "ArrowDown" || event.key === "ArrowUp") &&
-          !event.defaultPrevented
-        ) {
-          event.preventDefault();
-          move(event.key === "ArrowDown" ? 1 : -1);
+        if (inSearch && !event.defaultPrevented) {
+          const inField = lookup(bindings, chord, "list");
+          if (inField === "move-down" || inField === "move-up") {
+            event.preventDefault();
+            move(inField === "move-down" ? 1 : -1);
+          }
         }
         return;
       }
 
-      const key = event.key;
+      const action = lookup(bindings, chord);
       // Escape returns to the list from anywhere that is not the search box,
       // including the chat's own buttons, which are not text fields.
-      if (key === "Escape" && document.activeElement !== listRef.current) {
+      if (action === "list" && document.activeElement !== listRef.current) {
         event.preventDefault();
         focusList();
         return;
       }
-      if (key === "Tab" && !event.shiftKey) {
+      if (action === "write") {
         event.preventDefault();
         focusComposer();
         return;
       }
-      if (key === "/") {
+      if (action === "search") {
         event.preventDefault();
         searchRef.current?.focus();
         searchRef.current?.select();
         return;
       }
-      if (key === "g" || key === "s") {
+      if (action === "group-cycle" || action === "sort-cycle") {
         event.preventDefault();
         const next =
-          key === "g"
+          action === "group-cycle"
             ? { ...display, groupBy: cycleGroupBy(display.groupBy) }
             : { ...display, sortBy: cycleSortBy(display.sortBy) };
         changeDisplay(next);
         toast.success(
-          key === "g" ? GROUP_BY_LABEL[next.groupBy] : SORT_BY_LABEL[next.sortBy],
+          action === "group-cycle"
+            ? GROUP_BY_LABEL[next.groupBy]
+            : SORT_BY_LABEL[next.sortBy],
         );
         return;
       }
-      if (key === "j" || key === "ArrowDown") {
+      if (action === "move-down") {
         event.preventDefault();
         move(1);
         return;
       }
-      if (key === "k" || key === "ArrowUp") {
+      if (action === "move-up") {
         event.preventDefault();
         move(-1);
         return;
@@ -1120,15 +1106,15 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
       // Inbox-wide keys come before the selection guard: with nothing matching
       // there is no selected row, and that is exactly when you need Escape and
       // the view keys to get you out again.
-      if (key === "Escape") {
+      if (action === "list") {
         if (text !== "") {
           event.preventDefault();
           setText("");
         }
         return;
       }
-      if (/^[1-9]$/.test(key)) {
-        const view = views[Number(key) - 1];
+      if (/^[1-9]$/.test(event.key) && !event.metaKey) {
+        const view = views[Number(event.key) - 1];
         if (view !== undefined) {
           event.preventDefault();
           setText(view.query);
@@ -1137,20 +1123,20 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         return;
       }
 
-      if (key === "?") {
+      if (action === "help") {
         event.preventDefault();
         setSheetOpen(true);
         return;
       }
-      if (key === "ArrowLeft" || key === "ArrowRight" || key === "c") {
+      if (action === "fold" || action === "unfold" || action === "fold-toggle") {
         if (cursorGroup === null) return;
         event.preventDefault();
-        if (key === "c") {
+        if (action === "fold-toggle") {
           toggleGroup(cursorGroup);
           setCursor({ kind: "group", key: cursorGroup });
           return;
         }
-        if (key === "ArrowRight") {
+        if (action === "unfold") {
           // On a folded header this opens it. Anywhere else there is nothing
           // to the right, which is what a tree does too.
           if (folded.has(cursorGroup)) toggleGroup(cursorGroup, false);
@@ -1165,19 +1151,25 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         toggleGroup(cursorGroup, true);
         return;
       }
-      if (key === "f") {
+      if (action === "unread-first") {
         event.preventDefault();
         const unreadFirst = !display.unreadFirst;
         changeDisplay({ ...display, unreadFirst });
         toast.success(unreadFirst ? "Unread first" : "Unread in order");
         return;
       }
-      if (key === "[" || key === "]" || key === "\\") {
+      if (
+        action === "width-narrow" ||
+        action === "width-wide" ||
+        action === "width-reset"
+      ) {
         event.preventDefault();
-        resizeList(key === "[" ? -48 : key === "]" ? 48 : null);
+        resizeList(
+          action === "width-narrow" ? -48 : action === "width-wide" ? 48 : null,
+        );
         return;
       }
-      if (key === "u") {
+      if (action === "undo") {
         event.preventDefault();
         const last = archived.current.pop();
         if (last === undefined) {
@@ -1190,12 +1182,12 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         );
         return;
       }
-      if (key === "v") {
+      if (action === "view-save") {
         event.preventDefault();
         saveView();
         return;
       }
-      if (key === "x") {
+      if (action === "view-delete") {
         event.preventDefault();
         const applied = views.find((view) => view.query === text);
         if (applied === undefined) {
@@ -1216,22 +1208,22 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
       // the pane: pressing archive on a group header should do nothing.
       if (cursorRow === null) return;
       const selected = cursorRow;
-      if (key === "Enter") {
+      if (action === "open") {
         event.preventDefault();
         actions.open(selected.threadId);
-      } else if (key === "o") {
+      } else if (action === "open-split") {
         event.preventDefault();
         actions.open(selected.threadId, { split: true });
-      } else if (key === "e") {
+      } else if (action === "archive") {
         event.preventDefault();
         // The host archives and raises its own undo toast; `u` is the keyboard
         // path to the same thing, which is why the id goes on a stack here.
         archived.current.push(selected.threadId);
         actions.archive(selected.threadId);
-      } else if (key === "p") {
+      } else if (action === "pin") {
         event.preventDefault();
         void actions.setPinned(selected.threadId, !selected.isPinned);
-      } else if (key === "m") {
+      } else if (action === "read") {
         event.preventDefault();
         const read = selected.isUnread;
         rpc
@@ -1240,7 +1232,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
             () => toast.success(read ? "Marked read" : "Marked unread"),
             () => toast.error("Could not change that."),
           );
-      } else if (key === ".") {
+      } else if (action === "pull-request") {
         event.preventDefault();
         openPullRequest();
       }
@@ -1268,6 +1260,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
     toggleGroup,
     cursorRow,
     cursorGroup,
+    bindings,
   ]);
 
   // A project group names its project once, in the header, so the rows under it
@@ -1467,14 +1460,27 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         </ul>
 
         <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-          <kbd className="font-mono">↑↓</kbd> move ·{" "}
-          <kbd className="font-mono">tab</kbd> write ·{" "}
-          <kbd className="font-mono">esc</kbd> list ·{" "}
-          <kbd className="font-mono">/</kbd> find ·{" "}
-          <kbd className="font-mono">⏎</kbd> open ·{" "}
-          <kbd className="font-mono">e</kbd> done ·{" "}
-          <kbd className="font-mono">u</kbd> undo ·{" "}
-          <kbd className="font-mono">?</kbd> all keys
+          {(
+            [
+              ["move-down", "move"],
+              ["write", "write"],
+              ["list", "list"],
+              ["search", "find"],
+              ["open", "open"],
+              ["archive", "done"],
+              ["undo", "undo"],
+              ["help", "all keys"],
+            ] as [ActionId, string][]
+          ).map(([id, label], index) => {
+            const chord = bindings[id][0];
+            if (chord === undefined) return null;
+            return (
+              <span key={id}>
+                {index === 0 ? "" : " · "}
+                <kbd className="font-mono">{formatChord(chord)}</kbd> {label}
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -1486,7 +1492,9 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         onReset={() => commit(clamp(LIST_WIDTH_DEFAULT))}
       />
 
-      {sheetOpen ? <ShortcutSheet onClose={() => setSheetOpen(false)} /> : null}
+      {sheetOpen ? (
+        <ShortcutSheet bindings={bindings} onClose={() => setSheetOpen(false)} />
+      ) : null}
 
       <div
         className={cn(
@@ -1637,18 +1645,123 @@ function PaneHandle({
  * UI, because it cannot show which projects exist, which already have a mark,
  * or where that mark was found.
  */
+function Card({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-xl border border-border bg-card/40 p-4">
+      <h4 className="text-sm font-medium">{title}</h4>
+      <p className="mt-1 max-w-prose text-sm leading-relaxed text-muted-foreground">
+        {hint}
+      </p>
+      <div className="mt-4">{children}</div>
+    </section>
+  );
+}
+
+function Chord({ chord }: { chord: string }) {
+  return (
+    <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] leading-4 text-foreground">
+      {formatChord(chord)}
+    </kbd>
+  );
+}
+
+/** One action's chords, with a recorder that listens for the next keystroke. */
+function BindingRow({
+  action,
+  chords,
+  onChange,
+}: {
+  action: (typeof ACTIONS)[number];
+  chords: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const isDefault =
+    JSON.stringify(chords) === JSON.stringify(DEFAULT_BINDINGS[action.id]);
+
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <span className="min-w-0 flex-1 text-sm">{action.label}</span>
+      <div className="flex shrink-0 items-center gap-1">
+        {chords.length === 0 ? (
+          <span className="text-xs text-muted-foreground">Unbound</span>
+        ) : (
+          chords.map((chord) => (
+            <button
+              key={chord}
+              type="button"
+              title="Remove this key"
+              onClick={() => onChange(chords.filter((one) => one !== chord))}
+              className="group/chord"
+            >
+              <Chord chord={chord} />
+            </button>
+          ))
+        )}
+      </div>
+      <Button
+        size="sm"
+        variant={recording ? "default" : "ghost"}
+        className="w-24 shrink-0"
+        onKeyDown={(event) => {
+          if (!recording) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.key === "Escape") {
+            setRecording(false);
+            return;
+          }
+          // A lone modifier is the first half of a chord, not a chord.
+          if (["Shift", "Meta", "Control", "Alt"].includes(event.key)) return;
+          const chord = encodeChord(event.nativeEvent);
+          if (isReserved(chord)) {
+            toast.error(`${formatChord(chord)} belongs to bb or the system.`);
+            setRecording(false);
+            return;
+          }
+          onChange([...new Set([...chords, chord])].slice(0, 3));
+          setRecording(false);
+        }}
+        onBlur={() => setRecording(false)}
+        onClick={() => setRecording(true)}
+      >
+        {recording ? "Press a key" : "Add key"}
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="w-16 shrink-0 text-muted-foreground"
+        disabled={isDefault}
+        onClick={() => onChange(DEFAULT_BINDINGS[action.id])}
+      >
+        Reset
+      </Button>
+    </div>
+  );
+}
+
 function SettingsSection() {
   const rpc = useRpc<typeof rpcContract>();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [views, setViews] = useState<View[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
+  const [bindings, setBindings] = useState<Bindings>(DEFAULT_BINDINGS);
 
   const load = useCallback(() => {
     rpc.call("inbox_get").then(
       (next) => {
         setProjects(next.projects);
         setViews(next.views);
+        setBindings(resolveBindings(next.bindings));
       },
       () => setProjects([]),
     );
@@ -1680,21 +1793,26 @@ function SettingsSection() {
     return <p className="text-sm text-muted-foreground">Loading…</p>;
   }
 
+  const setChords = (action: ActionId, chords: string[]) => {
+    const next = { ...bindings, [action]: chords };
+    setBindings(next);
+    rpc.call("bindings_set", { bindings: next }).then(
+      (saved) => setBindings(resolveBindings(saved.bindings)),
+      () => toast.error("Could not save that key."),
+    );
+  };
+
+  const groups = ["Moving", "Acting", "Organising", "Layout"] as const;
+
   return (
-    <div className="space-y-6">
-      <section>
-        <h4 className="text-sm font-medium">Project icons</h4>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Each project shows its own mark, found automatically in conventional
-          places in its checkout, like{" "}
-          <code className="text-xs">public/icon.svg</code> or{" "}
-          <code className="text-xs">.github/logo.png</code>. Point one somewhere
-          else with a path relative to the project root. Leave it empty to go
-          back to auto-detect.
-        </p>
-        <ul className="mt-3 divide-y divide-border rounded-lg border border-border">
+    <div className="space-y-4">
+      <Card
+        title="Project marks"
+        hint="Each project shows its own icon, found automatically in conventional places in its checkout. Point one somewhere else with a path relative to the project root, or leave it empty to go back to auto-detect."
+      >
+        <ul className="divide-y divide-border">
           {projects.map((project) => (
-            <li key={project.id} className="flex items-center gap-3 p-3">
+            <li key={project.id} className="flex items-center gap-3 py-2.5">
               <ProjectMark
                 of={{
                   projectName: project.name,
@@ -1710,9 +1828,7 @@ function SettingsSection() {
                     ? "No checkout, so there is nowhere to look"
                     : project.iconSource === null
                       ? "No icon found"
-                      : project.iconOverride === null
-                        ? `Found at ${project.iconSource}`
-                        : `Set to ${project.iconSource}`}
+                      : `${project.iconOverride === null ? "Found at" : "Set to"} ${project.iconSource}`}
                 </p>
               </div>
               {project.hasCheckout ? (
@@ -1721,7 +1837,7 @@ function SettingsSection() {
                     value={drafts[project.id] ?? project.iconOverride ?? ""}
                     placeholder="public/icon.svg"
                     aria-label={`Icon path for ${project.name}`}
-                    className="h-8 w-56 font-mono text-xs"
+                    className="h-8 w-64 font-mono text-xs"
                     onChange={(event) =>
                       setDrafts((current) => ({
                         ...current,
@@ -1735,6 +1851,7 @@ function SettingsSection() {
                   <Button
                     size="sm"
                     variant="secondary"
+                    className="w-20 shrink-0"
                     disabled={saving === project.id}
                     onClick={() => save(project)}
                   >
@@ -1745,29 +1862,26 @@ function SettingsSection() {
             </li>
           ))}
         </ul>
-      </section>
+      </Card>
 
-      <section>
-        <h4 className="text-sm font-medium">Saved views</h4>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Save one from the Inbox with <kbd className="font-mono text-xs">v</kbd>.
-          Number keys jump to them, in this order.
-        </p>
+      <Card
+        title="Saved views"
+        hint="Save the search you are looking at from the Inbox. The number keys jump to them, in this order."
+      >
         {views.length === 0 ? (
-          <p className="mt-3 rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+          <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
             None yet.
           </p>
         ) : (
-          <ul className="mt-3 divide-y divide-border rounded-lg border border-border">
+          <ul className="divide-y divide-border">
             {views.map((view, index) => (
-              <li key={view.id} className="flex items-center gap-3 p-3">
-                <span className="w-4 shrink-0 font-mono text-xs text-muted-foreground">
-                  {index + 1}
-                </span>
+              <li key={view.id} className="flex items-center gap-3 py-2.5">
+                <Chord chord={String(index + 1)} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">{view.name}</p>
                   <p className="truncate font-mono text-xs text-muted-foreground">
-                    {view.query || "(everything)"} · {GROUP_BY_LABEL[view.display.groupBy]} ·{" "}
+                    {view.query || "(everything)"} ·{" "}
+                    {GROUP_BY_LABEL[view.display.groupBy]} ·{" "}
                     {SORT_BY_LABEL[view.display.sortBy]}
                   </p>
                 </div>
@@ -1788,26 +1902,45 @@ function SettingsSection() {
             ))}
           </ul>
         )}
-      </section>
+      </Card>
 
-      <section>
-        <h4 className="text-sm font-medium">Keyboard</h4>
-        <dl className="mt-3 grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-2">
-          {SHORTCUTS.map((shortcut) => (
-            <div key={shortcut.keys} className="flex items-baseline gap-3 text-sm">
-              <dt className="w-28 shrink-0 font-mono text-xs text-muted-foreground">
-                {shortcut.keys}
-              </dt>
-              <dd className="min-w-0 flex-1">{shortcut.does}</dd>
+      <Card
+        title="Keyboard"
+        hint="These are defaults, not rules. Add a key to any action, click a key to remove it, and reset one at a time. A key with no modifier only works while the list has focus, because anywhere else it would type a character."
+      >
+        <div className="space-y-4">
+          {groups.map((group) => (
+            <div key={group}>
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                {group}
+              </p>
+              <div className="mt-1 divide-y divide-border">
+                {ACTIONS.filter((action) => action.group === group).map(
+                  (action) => (
+                    <BindingRow
+                      key={action.id}
+                      action={action}
+                      chords={bindings[action.id]}
+                      onChange={(chords) => setChords(action.id, chords)}
+                    />
+                  ),
+                )}
+              </div>
             </div>
           ))}
-        </dl>
-      </section>
+        </div>
+      </Card>
     </div>
   );
 }
 
-function ShortcutSheet({ onClose }: { onClose: () => void }) {
+function ShortcutSheet({
+  bindings,
+  onClose,
+}: {
+  bindings: Bindings;
+  onClose: () => void;
+}) {
   return (
     <div
       role="dialog"
@@ -1815,20 +1948,26 @@ function ShortcutSheet({ onClose }: { onClose: () => void }) {
       onClick={onClose}
       className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 p-6 backdrop-blur-sm"
     >
-      <div className="max-h-full w-full max-w-md overflow-y-auto rounded-lg border border-border bg-card p-4 shadow-lg">
-        <p className="mb-3 text-sm font-medium">Keyboard</p>
-        <dl className="space-y-1.5">
-          {SHORTCUTS.map((shortcut) => (
-            <div key={shortcut.keys} className="flex items-baseline gap-3 text-sm">
-              <dt className="w-32 shrink-0 font-mono text-xs text-muted-foreground">
-                {shortcut.keys}
+      <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-lg">
+        <p className="text-sm font-medium">Keyboard</p>
+        <dl className="mt-3 space-y-1">
+          {ACTIONS.map((action) => (
+            <div key={action.id} className="flex items-baseline gap-3 text-sm">
+              <dt className="flex w-32 shrink-0 flex-wrap justify-end gap-1">
+                {bindings[action.id].length === 0 ? (
+                  <span className="text-xs text-muted-foreground">unbound</span>
+                ) : (
+                  bindings[action.id].map((chord) => (
+                    <Chord key={chord} chord={chord} />
+                  ))
+                )}
               </dt>
-              <dd className="min-w-0 flex-1">{shortcut.does}</dd>
+              <dd className="min-w-0 flex-1">{action.label}</dd>
             </div>
           ))}
         </dl>
-        <p className="mt-3 text-xs text-muted-foreground">
-          Any key closes this.
+        <p className="mt-4 text-xs text-muted-foreground">
+          Change any of these in the plugin settings. Any key closes this.
         </p>
       </div>
     </div>
