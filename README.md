@@ -1,18 +1,16 @@
-# bb-plugin-kanban
+# bb-plugin-inbox
 
-The **Inbox**: one searchable list of every thread, with the context beside it
-to answer one and move on. The plugin id is still `kanban` from its first
-shape, which was a board; the board is gone.
+**Inbox** for BB: one searchable list of every thread, with bb's own thread
+view beside it, so a context switch costs a keystroke instead of a navigation.
 
-- `server.ts` — the backend: tags, the agent's standing note, saved views,
-  deep search, replying to a thread, and project icons.
-- `app.tsx` — the frontend: the Inbox page in the left sidebar, master and
-  detail, keyboard first.
+- `server.ts` — tags, the agent's standing note, saved views, deep search, and
+  project icons.
+- `app.tsx` — the Inbox page: the list, and bb's `ThreadChat` in the pane.
 - `lib/query.ts`, `lib/display.ts`, `lib/project-visuals.ts`,
   `lib/icon-candidates.ts` — the search language, grouping and sorting, project
-  colours, and the icon candidate list. All pure and unit-tested (`npm test`,
+  marks, and the icon candidate list. All pure and unit-tested (`npm test`,
   Node's own runner, no framework).
-- `skills/desk/SKILL.md` — the skill that tells agents to keep their note
+- `skills/inbox/SKILL.md` — the skill that tells agents to keep their note
   current and to say what they are blocked on.
 
 ## Why it is not a board
@@ -135,15 +133,18 @@ a search that matches nothing still has to let you press Escape or a view key.
 Tool sets apply at the next session start, so a thread already running when the
 plugin was installed does not see them until it restarts.
 
-## Project colours and icons
+## Project marks
 
-Every row carries its project's mark: a coloured left edge and a small chip.
+Each row carries its project's own icon. Under a **project** grouping the mark
+moves up to the group header and the rows stop repeating it, since the header
+already says which project they are in.
 
-**Colour** always works, with no repo and no configuration. Hues come from a
-slot handed out once per project and spun by the golden angle. Hashing the
-project id was the obvious approach and it was wrong: four real projects hashed
-into one 83° band of blue-purple, two of them 14° apart. A slot is permanent,
-so adding a project never repaints the others.
+There used to be a coloured bar down the left of every row, keyed to a
+generated hue. It is gone. An invented colour sitting beside a real brand mark
+reads as noise, not information, and it never matched the actual project. The
+generated hue now survives only on the initials chip for a project we could not
+find an icon for, where it is the only identity available. If you want project
+colour to mean something, the honest fix is a per-project setting, not a hash.
 
 **The icon** is the project's own mark, read out of its checkout and cached as
 bytes, served from the plugin's own HTTP route keyed by digest. Detection walks
@@ -162,7 +163,7 @@ identical.
 
 ## The mark
 
-`assets/desk.svg`, an inbox tray. Two earlier attempts did not survive the
+`assets/inbox.svg`, an inbox tray. Two earlier attempts did not survive the
 sidebar:
 
 - `ListTodo`, the scaffold default, is a checklist, and his sidebar already had
@@ -175,7 +176,7 @@ The tray works because its silhouette is bold enough to survive the size, and
 because nothing else in that sidebar is a container. BB serves the file hashed
 and draws it as a `currentColor` mask, so it inherits the theme and needs no
 colour of its own. It is also declared under `bb.branding.experimental_icons`
-as `desk`, so `task_note` and `task_tag` rows in a transcript carry the same
+as `inbox`, so `task_note` and `task_tag` rows in a transcript carry the same
 mark.
 
 ## Settings
