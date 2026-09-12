@@ -660,7 +660,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // --- Agent tools --------------------------------------------------------
   // The point of these is context reload. An agent that keeps one honest line
-  // current means Bruno can pick a thread back up without reading a transcript.
+  // current means you can pick a thread back up without reading a transcript.
 
   bb.agents.registerTool({
     name: "task_note",

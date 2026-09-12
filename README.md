@@ -43,17 +43,17 @@ working" is the useful reading.
 
 | Type this | To find |
 | --- | --- |
-| `ol-3857` | A Linear ticket in a title or branch. |
-| `#3553` or `pr:3553` | A pull request, by number. |
-| `sean/ol-3850` | A branch. |
-| `[offerlab]` | A project. Repeat to OR several; a picker opens on `[`. |
+| `eng-482` | A Linear ticket in a title or branch. |
+| `#1284` or `pr:1284` | A pull request, by number. |
+| `dana/eng-517` | A branch. |
+| `[checklab]` | A project. Repeat to OR several; a picker opens on `[`. |
 | `is:blocked` | Also `is:working`, `is:idle`, `is:done`. |
-| `tag:slop` | A tag you or an agent set. |
+| `tag:review` | A tag you or an agent set. |
 | `since:3d`, `before:2026-09-01` | When it was last touched. |
 | `stripe webhook` | Any text, across all of the above. |
 
 Every term must hit, so more words narrow. Each term matches as a substring or
-a subsequence, so `ofl` still finds `offerlab`.
+a subsequence, so `chk` still finds `checkout`.
 
 When the live list comes up short, the plugin also searches bb's full index,
 including **archived** threads and **message bodies**, and shows those under
@@ -86,10 +86,10 @@ device on purpose.
 
 bb's sidebar already organizes threads by project or machine and sorts by
 updated, created, or alphabetical. The overlap is real, and it is not the
-point. The sidebar organizes **browsing**: where is my offerlab work. The inbox
+point. The sidebar organizes **browsing**: where is my checkout work. The inbox
 organizes **triage**: what needs me, across everything. That is why its default
 grouping is by state, which the sidebar cannot do at all, and why a blocked
-thread in offerlab and a blocked thread in influencekit land in the same group
+thread in checkout and a blocked thread in analytics land in the same group
 here and in different sections there.
 
 Project and day grouping exist as alternates because once you are looking at
@@ -157,9 +157,9 @@ colour to mean something, the honest fix is a per-project setting, not a hash.
 bytes, served from the plugin's own HTTP route keyed by digest. Detection walks
 a fixed list of conventional paths (`lib/icon-candidates.ts`), best first, and
 stops at the first non-empty file. It is deliberately not a search: scanning a
-real repo's asset roots turns up `public/test-assets/` full of customers' logos
+real repo's asset roots turns up `public/test-assets/` full of other companies’ logos
 and `app/assets/images/logos/` full of integration partners, and showing
-Heroku's mark as a project's icon is worse than showing none. Zero-byte files
+another company’s mark as a project’s icon is worse than showing none. Zero-byte files
 are skipped too, because Rails ships empty placeholder favicons.
 
 Point the inbox at a mark it did not find with the **Project icon overrides**

@@ -18,7 +18,7 @@ const MIDNIGHT = new Date(new Date(NOW).toDateString()).getTime();
 
 const row = (over: Partial<Groupable> & { threadId: string }): Groupable => ({
   title: "A thread",
-  projectName: "offerlab",
+  projectName: "checkout",
   state: "idle",
   createdAt: NOW - 100 * HOURS,
   updatedAt: NOW - HOURS,
@@ -53,17 +53,17 @@ test("state groups come out in triage order", () => {
 test("project groups read alphabetically", () => {
   const groups = groupRows(
     [
-      row({ threadId: "a", projectName: "workflow" }),
-      row({ threadId: "b", projectName: "influencekit" }),
-      row({ threadId: "c", projectName: "offerlab" }),
+      row({ threadId: "a", projectName: "tooling" }),
+      row({ threadId: "b", projectName: "analytics" }),
+      row({ threadId: "c", projectName: "checkout" }),
     ],
     display({ groupBy: "project" }),
     NOW,
   );
   assert.deepEqual(groups.map((g) => g.label), [
-    "influencekit",
-    "offerlab",
-    "workflow",
+    "analytics",
+    "checkout",
+    "tooling",
   ]);
 });
 
@@ -95,7 +95,7 @@ test("dayBucket splits on the local midnight, not on 24-hour windows", () => {
 
 test("flat grouping returns one group", () => {
   const groups = groupRows(
-    [row({ threadId: "a" }), row({ threadId: "b", projectName: "workflow" })],
+    [row({ threadId: "a" }), row({ threadId: "b", projectName: "tooling" })],
     display({ groupBy: "none" }),
     NOW,
   );
@@ -194,7 +194,7 @@ test("grouping never drops or duplicates a row", () => {
   const rows = [
     row({ threadId: "a", state: "needs-me" }),
     row({ threadId: "b", isPinned: true }),
-    row({ threadId: "c", projectName: "workflow", updatedAt: NOW - 500 * HOURS }),
+    row({ threadId: "c", projectName: "tooling", updatedAt: NOW - 500 * HOURS }),
     row({ threadId: "d", state: "working" }),
   ];
   for (const groupBy of ["state", "project", "day", "none"] as const) {

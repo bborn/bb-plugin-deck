@@ -58,16 +58,16 @@ test("overrides parse as project = path, one per line", () => {
   const overrides = parseIconOverrides(
     [
       "# a comment",
-      "offerlab = app/assets/images/logo/Logomark.svg",
-      "  InfluenceKit=public/apple-touch-icon.png  ",
+      "checkout = app/assets/images/logo/Logomark.svg",
+      "  Analytics=public/apple-touch-icon.png  ",
       "",
       "broken line with no equals",
       "escape = ../../etc/icon.png",
       "notimage = README.md",
     ].join("\n"),
   );
-  assert.equal(overrides.get("offerlab"), "app/assets/images/logo/Logomark.svg");
-  assert.equal(overrides.get("influencekit"), "public/apple-touch-icon.png");
+  assert.equal(overrides.get("checkout"), "app/assets/images/logo/Logomark.svg");
+  assert.equal(overrides.get("analytics"), "public/apple-touch-icon.png");
   assert.equal(overrides.has("escape"), false);
   assert.equal(overrides.has("notimage"), false);
   assert.equal(overrides.size, 2);

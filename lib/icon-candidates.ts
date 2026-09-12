@@ -3,7 +3,7 @@
 // This is a fixed list of conventional paths, not a search. That is deliberate.
 // A recursive scan of a real repo's asset roots finds `public/test-assets/`
 // full of customer logos and `app/assets/images/logos/` full of integration
-// partners — showing Heroku's mark as a project's icon is worse than showing
+// partners — showing another company’s mark as a project’s icon is worse than showing
 // no icon at all. Only paths that conventionally mean "this application's own
 // mark" are trusted.
 

@@ -27,7 +27,7 @@ export function colorForHue(hue: number): string {
 
 /**
  * One or two characters standing in for a project with no icon. Words win over
- * raw characters, so "influence kit" reads IK and "offerlab" reads OF.
+ * raw characters, so "influence kit" reads IK and "checkout" reads OF.
  */
 export function projectInitials(name: string): string {
   const words = name.split(/[\s_\-./]+/).filter((word) => /[a-z0-9]/i.test(word));

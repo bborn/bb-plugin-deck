@@ -59,7 +59,7 @@ interface Row extends Matchable, Groupable {
   blockedOn: string | null;
 }
 
-const SEARCH_PLACEHOLDER = "Find anything: OL-3857, #3553, a branch, [project]";
+const SEARCH_PLACEHOLDER = "Find anything: ENG-482, #1284, a branch, [project]";
 
 /**
  * A thread's state, read off the thread rather than assigned. "Needs you" is
@@ -749,24 +749,32 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
   };
 
   const focusList = useCallback(() => {
+    composerWanted.current = false;
     listRef.current?.focus();
   }, []);
   // The panel opens with the list focused, so the first arrow key works
   // without touching the mouse.
   useEffect(focusList, [focusList]);
+  /**
+   * False unless you asked for the composer with Tab. The host's chat takes
+   * focus for itself when its thread changes, which reads as the arrow keys
+   * dying mid-navigation, so after every selection change we take it back
+   * unless you actually asked to write.
+   */
+  const composerWanted = useRef(false);
   const focusComposer = useCallback(() => {
+    composerWanted.current = true;
     setFocusRequest((at) => at + 1);
   }, []);
-  // True while the caret belongs in the composer. Switching threads swaps the
-  // chat's contents underneath it, so the request to focus has to be re-sent
-  // once the new thread has settled rather than during the switch.
-  const keepComposer = useRef(false);
-  const selectedId2 = selected?.threadId ?? null;
+  const shownThreadId = selected?.threadId ?? null;
   useEffect(() => {
-    if (!keepComposer.current || selectedId2 === null) return;
-    const timer = setTimeout(focusComposer, 80);
+    if (composerWanted.current || shownThreadId === null) return;
+    const timer = setTimeout(() => {
+      if (!composerWanted.current) listRef.current?.focus();
+    }, 120);
     return () => clearTimeout(timer);
-  }, [selectedId2, focusComposer]);
+  }, [shownThreadId]);
+
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -798,15 +806,14 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
       const typing = isTypingTarget(event.target);
       const inSearch = event.target === searchRef.current;
 
-      // Shift+arrows walk threads from ANYWHERE in the panel, including mid
-      // sentence in the composer. That is the whole point: changing which
-      // thread you are answering should not cost you the caret. Switching
-      // threads remounts the chat, so the caret has to be asked back
-      // explicitly once the new one is up.
+      // Shift+arrows reach the list from inside the composer, and land you
+      // back in the list rather than holding the caret. Keeping the caret in
+      // the composer was tried and it steals the plain arrow keys: once you
+      // are navigating, navigation is what the arrows should do.
       if (event.shiftKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
         event.preventDefault();
-        keepComposer.current = typing && !inSearch;
         move(event.key === "ArrowDown" ? 1 : -1);
+        if (typing) focusList();
         return;
       }
 
@@ -815,7 +822,6 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         // walking the browser's focus order through every control.
         if (inSearch && event.key === "Tab" && !event.shiftKey) {
           event.preventDefault();
-          keepComposer.current = true;
           focusComposer();
           return;
         }
@@ -823,7 +829,6 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         // one key that always gets you home.
         if (event.key === "Escape" && !inSearch) {
           event.preventDefault();
-          keepComposer.current = false;
           focusList();
           return;
         }
@@ -839,9 +844,15 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
       }
 
       const key = event.key;
+      // Escape returns to the list from anywhere that is not the search box,
+      // including the chat's own buttons, which are not text fields.
+      if (key === "Escape" && document.activeElement !== listRef.current) {
+        event.preventDefault();
+        focusList();
+        return;
+      }
       if (key === "Tab" && !event.shiftKey) {
         event.preventDefault();
-        keepComposer.current = true;
         focusComposer();
         return;
       }
@@ -1076,7 +1087,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         </ul>
 
         <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-          <kbd className="font-mono">⇧↑↓</kbd> thread ·{" "}
+          <kbd className="font-mono">↑↓</kbd> move ·{" "}
           <kbd className="font-mono">tab</kbd> write ·{" "}
           <kbd className="font-mono">esc</kbd> list ·{" "}
           <kbd className="font-mono">/</kbd> find ·{" "}

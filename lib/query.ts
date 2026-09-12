@@ -1,9 +1,9 @@
-// The search language. One box, and it has to hit anything Bruno might
+// The search language. One box, and it has to hit anything you might
 // remember about a task: a Linear ticket buried in a title, a PR number, a
 // branch, a project, a tag, roughly when it happened, or a phrase the agent
 // said. The shapes come from his real board: titles like
-// "OL-3857: Don't take over the cart", "[Slop] Review: .../pull/3553", and
-// branches like "sean/ol-3850-skip-the-turn-it-on-step".
+// "ENG-482: retry the webhook", "Review: .../pull/1284", and
+// branches like "dana/eng-517-skip-the-setup-step".
 //
 // Pure and testable: the page filters on every keystroke without a round trip.
 
@@ -128,7 +128,7 @@ export function parseQuery(raw: string, now = Date.now()): Query {
       continue;
     }
     // A bare #1234 is how he writes a PR in a title, so it filters on the PR
-    // number AND stays as text, since "#3553" appears inside titles too.
+    // number AND stays as text, since "#1284" appears inside titles too.
     if (/^#\d+$/.test(word)) {
       prNumbers.push(Number.parseInt(word.slice(1), 10));
       words.push(word.slice(1));
@@ -240,8 +240,8 @@ export function matches(row: Matchable, query: Query): boolean {
 
 /**
  * Every whitespace-separated term must appear. Each term matches as a
- * substring, or as a subsequence so "ofl" still finds "offerlab". Requiring
- * every term is what makes "ol-3857 cart" narrow the way you expect.
+ * substring, or as a subsequence so "chk" still finds "checkout". Requiring
+ * every term is what makes "eng-482 cart" narrow the way you expect.
  */
 export function fuzzyMatch(text: string, query: string): boolean {
   const terms = query.split(/\s+/).filter((term) => term !== "");

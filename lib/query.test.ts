@@ -11,14 +11,14 @@ import {
 } from "./query.ts";
 
 // Rows shaped like the real board: Linear tickets in titles, PR links in
-// titles, kind markers in brackets, sean/ol-... branches.
+// titles, kind markers in brackets, dana/ol-... branches.
 const row = (over: Partial<Matchable> = {}): Matchable => ({
-  title: "OL-3857: Don't take over the cart when the merchant's Stripe is disconnected",
-  projectName: "offerlab",
-  branchName: "sean/ol-3857-cart-takeover",
-  prNumber: 3553,
+  title: "ENG-482: retry the webhook when the signature check arrives late",
+  projectName: "checkout",
+  branchName: "dana/eng-482-cart-takeover",
+  prNumber: 1284,
   prTitle: "Skip the turn-it-on step",
-  tags: ["slop"],
+  tags: ["review"],
   note: null,
   state: "needs-me",
   updatedAt: Date.parse("2026-09-10T12:00:00Z"),
@@ -32,18 +32,18 @@ test("an empty query matches everything", () => {
 });
 
 test("a Linear ticket in the title is findable", () => {
-  assert.equal(matches(row(), parseQuery("ol-3857")), true);
-  assert.equal(matches(row(), parseQuery("OL-3857")), true);
+  assert.equal(matches(row(), parseQuery("eng-482")), true);
+  assert.equal(matches(row(), parseQuery("ENG-482")), true);
   assert.equal(matches(row(), parseQuery("ol-9999")), false);
 });
 
 test("a branch name is findable", () => {
-  assert.equal(matches(row(), parseQuery("sean/ol-3857")), true);
+  assert.equal(matches(row(), parseQuery("dana/eng-482")), true);
   assert.equal(matches(row(), parseQuery("cart-takeover")), true);
 });
 
 test("a PR number is findable bare, with #, and with pr:", () => {
-  for (const text of ["3553", "#3553", "pr:3553"]) {
+  for (const text of ["1284", "#1284", "pr:1284"]) {
     assert.equal(matches(row(), parseQuery(text)), true, text);
   }
   assert.equal(matches(row(), parseQuery("pr:9999")), false);
@@ -51,7 +51,7 @@ test("a PR number is findable bare, with #, and with pr:", () => {
 
 test("pr: matches the PR even when the number is nowhere in the text", () => {
   const bare = row({ title: "Fix the cart", prTitle: null, branchName: null });
-  assert.equal(matches(bare, parseQuery("pr:3553")), true);
+  assert.equal(matches(bare, parseQuery("pr:1284")), true);
 });
 
 test("every term must hit, so more words narrow", () => {
@@ -60,23 +60,23 @@ test("every term must hit, so more words narrow", () => {
 });
 
 test("[project] scopes, the way he already writes it", () => {
-  assert.equal(matches(row(), parseQuery("[offerlab]")), true);
-  assert.equal(matches(row({ projectName: "taskyou" }), parseQuery("[offerlab]")), false);
+  assert.equal(matches(row(), parseQuery("[checkout]")), true);
+  assert.equal(matches(row({ projectName: "tooling" }), parseQuery("[checkout]")), false);
   assert.equal(
-    matches(row({ projectName: "influencekit" }), parseQuery("[offerlab] [influencekit]")),
+    matches(row({ projectName: "analytics" }), parseQuery("[checkout] [analytics]")),
     true,
   );
 });
 
 test("an unclosed [project still filters, fuzzily", () => {
-  const query = parseQuery("[offer");
-  assert.equal(query.partialProject, "offer");
+  const query = parseQuery("[check");
+  assert.equal(query.partialProject, "check");
   assert.equal(matches(row(), query), true);
-  assert.equal(matches(row({ projectName: "taskyou" }), query), false);
+  assert.equal(matches(row({ projectName: "tooling" }), query), false);
 });
 
 test("a bare open bracket narrows nothing yet", () => {
-  assert.equal(matches(row({ projectName: "taskyou" }), parseQuery("[")), true);
+  assert.equal(matches(row({ projectName: "tooling" }), parseQuery("[")), true);
 });
 
 test("is: tokens are OR'd, because 'blocked or working' is the useful read", () => {
@@ -100,10 +100,10 @@ test("a half-typed is: token narrows nothing instead of matching nothing", () =>
 });
 
 test("tag: tokens are AND'd, because two tags should narrow", () => {
-  const tagged = row({ tags: ["slop", "review"] });
-  assert.equal(matches(tagged, parseQuery("tag:slop")), true);
-  assert.equal(matches(tagged, parseQuery("tag:slop tag:review")), true);
-  assert.equal(matches(tagged, parseQuery("tag:slop tag:security")), false);
+  const tagged = row({ tags: ["review", "review"] });
+  assert.equal(matches(tagged, parseQuery("tag:review")), true);
+  assert.equal(matches(tagged, parseQuery("tag:review tag:review")), true);
+  assert.equal(matches(tagged, parseQuery("tag:review tag:security")), false);
 });
 
 test("since: and before: bound by when the thread was last touched", () => {
@@ -129,11 +129,11 @@ test("when: accepts durations, dates, and today", () => {
 });
 
 test("tokens of different kinds combine", () => {
-  const query = parseQuery("[offerlab] is:blocked tag:slop cart");
+  const query = parseQuery("[checkout] is:blocked tag:review cart");
   assert.equal(matches(row(), query), true);
   assert.equal(matches(row({ state: "done" }), query), false);
   assert.equal(matches(row({ tags: [] }), query), false);
-  assert.equal(matches(row({ projectName: "taskyou" }), query), false);
+  assert.equal(matches(row({ projectName: "tooling" }), query), false);
 });
 
 test("the agent's standing note is searchable", () => {
@@ -143,20 +143,20 @@ test("the agent's standing note is searchable", () => {
 
 test("searchableText covers every field a row is found by", () => {
   const text = searchableText(row());
-  for (const fragment of ["ol-3857", "offerlab", "sean/ol-3857", "#3553", "slop"]) {
+  for (const fragment of ["eng-482", "checkout", "dana/eng-482", "#1284", "review"]) {
     assert.ok(text.includes(fragment), fragment);
   }
 });
 
 test("fuzzyMatch takes substrings and subsequences", () => {
-  assert.equal(fuzzyMatch("offerlab", "ofl"), true);
-  assert.equal(fuzzyMatch("offerlab", "lab"), true);
-  assert.equal(fuzzyMatch("offerlab", "xyz"), false);
+  assert.equal(fuzzyMatch("checkout", "chk"), true);
+  assert.equal(fuzzyMatch("checkout", "out"), true);
+  assert.equal(fuzzyMatch("checkout", "xyz"), false);
 });
 
 test("project suggestions only appear for an open tag", () => {
-  const names = ["offerlab", "influencekit", "taskyou"];
+  const names = ["checkout", "analytics", "tooling"];
   assert.deepEqual(projectSuggestions(names, null), []);
   assert.deepEqual(projectSuggestions(names, ""), names);
-  assert.deepEqual(projectSuggestions(names, "off"), ["offerlab"]);
+  assert.deepEqual(projectSuggestions(names, "che"), ["checkout"]);
 });

@@ -48,7 +48,7 @@ test("the colour is a usable oklch string", () => {
 });
 
 test("initials prefer word boundaries", () => {
-  assert.equal(projectInitials("offerlab"), "OF");
+  assert.equal(projectInitials("checkout"), "CH");
   assert.equal(projectInitials("influence kit"), "IK");
   assert.equal(projectInitials("my-side-project"), "MS");
   assert.equal(projectInitials("Personal"), "PE");
