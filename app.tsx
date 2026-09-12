@@ -246,6 +246,53 @@ interface Marked {
  * not. The colour is now only ever a stand-in for a missing icon: an invented
  * hue sitting next to a real brand mark reads as noise, not information.
  */
+/** Build the plugin's view of the host's threads. Shared by both surfaces. */
+function useRows(
+  threads: readonly PluginSidebarThread[],
+  hostProjects: readonly { id: string; name: string }[],
+  projects: Project[],
+  meta: Meta[],
+): Row[] {
+  const projectById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project] as const)),
+    [projects],
+  );
+  const metaById = useMemo(
+    () => new Map(meta.map((entry) => [entry.threadId, entry] as const)),
+    [meta],
+  );
+  return useMemo(
+    () =>
+      threads.map((thread) => {
+        const project = projectById.get(thread.projectId);
+        const own = metaById.get(thread.id);
+        const hostProject = hostProjects.find(
+          (candidate) => candidate.id === thread.projectId,
+        );
+        return {
+          threadId: thread.id,
+          title: thread.title ?? thread.titleFallback ?? "Untitled",
+          projectId: thread.projectId,
+          projectName: project?.name ?? hostProject?.name ?? "Unknown",
+          projectHue: project?.hue ?? 0,
+          projectIconUrl: project?.iconUrl ?? null,
+          branchName: thread.environment?.branchName ?? null,
+          prNumber: null,
+          prTitle: null,
+          tags: own?.tags ?? [],
+          note: own?.note ?? null,
+          blockedOn: own?.blockedOn ?? null,
+          state: stateOf(thread, own?.blockedOn ?? null),
+          createdAt: thread.createdAt,
+          updatedAt: thread.updatedAt,
+          isUnread: thread.isUnread,
+          isPinned: thread.isPinned,
+        };
+      }),
+    [threads, projectById, metaById, hostProjects],
+  );
+}
+
 function ProjectMark({ of, className }: { of: Marked; className?: string }) {
   const [broken, setBroken] = useState(false);
   if (of.projectIconUrl !== null && !broken) {
@@ -768,34 +815,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
     [meta],
   );
 
-  const rows = useMemo<Row[]>(() => {
-    return threads.map((thread) => {
-      const project = projectById.get(thread.projectId);
-      const own = metaById.get(thread.id);
-      const hostProject = hostProjects.find(
-        (candidate) => candidate.id === thread.projectId,
-      );
-      return {
-        threadId: thread.id,
-        title: thread.title ?? thread.titleFallback ?? "Untitled",
-        projectId: thread.projectId,
-        projectName: project?.name ?? hostProject?.name ?? "Unknown",
-        projectHue: project?.hue ?? 0,
-        projectIconUrl: project?.iconUrl ?? null,
-        branchName: thread.environment?.branchName ?? null,
-        prNumber: null,
-        prTitle: null,
-        tags: own?.tags ?? [],
-        note: own?.note ?? null,
-        blockedOn: own?.blockedOn ?? null,
-        state: stateOf(thread, own?.blockedOn ?? null),
-        createdAt: thread.createdAt,
-        updatedAt: thread.updatedAt,
-        isUnread: thread.isUnread,
-        isPinned: thread.isPinned,
-      };
-    });
-  }, [threads, projectById, metaById, hostProjects]);
+  const rows = useRows(threads, hostProjects, projects, meta);
 
   const matching = useMemo(
     () => rows.filter((row) => matches(row, query)),
