@@ -188,9 +188,18 @@ mark.
 
 ## Settings
 
-| Setting | Default | Effect |
-| --- | --- | --- |
-| Project icon overrides | empty | `project = repo/relative/path.svg` per line, for a mark auto-detection misses. |
+The plugin's settings page (Settings, then Installed plugins, then Inbox) is a
+real page, not a text field:
+
+- **Project icons**, a row per project showing its mark, where the icon was
+  found, and a box to point it somewhere else. Empty means auto-detect.
+- **Saved views**, listed in number-key order, each deletable.
+- **Keyboard**, the same table the in-app `?` sheet renders from.
+
+The declarative `Project icon overrides` field above it is the storage behind
+that page, `project = repo/relative/path.svg` one per line. Editing it by hand
+still works, and the page rewrites only the line for the project you changed.
+Paths are rejected unless they are relative, inside the project, and an image.
 
 ## UI components
 

@@ -65,6 +65,12 @@ const projectSchema = z.object({
   name: z.string(),
   iconUrl: z.string().nullable(),
   hue: z.number(),
+  /** Repo-relative path the icon was read from, shown on the settings page. */
+  iconSource: z.string().nullable(),
+  /** The override in effect for this project, if the user set one. */
+  iconOverride: z.string().nullable(),
+  /** False when the project has no checkout to look in. */
+  hasCheckout: z.boolean(),
 });
 const hitSchema = z.object({
   threadId: z.string(),
@@ -125,6 +131,15 @@ export const rpcContract = defineRpcContract({
     }),
     output: z.object({ views: z.array(viewSchema) }),
   },
+  // Per-project icon override, so the settings page can be a row per project
+  // rather than a text blob whose syntax the user has to learn.
+  icon_override_set: {
+    input: z.object({
+      projectName: z.string().min(1),
+      path: z.string().max(256),
+    }),
+    output: z.object({ projects: z.array(projectSchema) }),
+  },
   view_delete: {
     input: z.object({ id: z.string() }),
     output: z.object({ views: z.array(viewSchema) }),
@@ -157,7 +172,7 @@ export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     iconPaths: {
       type: "string",
-      label: "Project icon overrides",
+      label: "Project icon overrides (edited above, one `project = path` per line)",
       experimental_multiline: true,
       default: "",
       // One `project = repo/relative/path.svg` per line. Detection only looks
@@ -527,12 +542,17 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`icon lookup failed: ${String(cause)}`);
       });
     }
+    const { iconPaths } = await settings.get();
+    const overrides = parseIconOverrides(iconPaths);
     return listed
       .map((project) => ({
         id: project.id,
         name: project.name,
         iconUrl: iconUrlFor(project.id),
         hue: hues.get(project.id) ?? 0,
+        iconSource: selectIcon.get(project.id)?.source_path ?? null,
+        iconOverride: overrides.get(project.name.toLowerCase()) ?? null,
+        hasCheckout: localSource(project) !== null,
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -671,6 +691,28 @@ export default async function plugin(bb: BbPluginApi) {
       }
       bb.realtime.publish(INBOX_CHANGED, { views: true });
       return { views: listViews() };
+    },
+
+    icon_override_set: async ({ projectName, path }) => {
+      const wanted = path.trim();
+      if (wanted !== "" && !isSafeRelativePath(wanted)) {
+        throw new Error(
+          "Use a relative path to an image inside the project, like public/icon.svg.",
+        );
+      }
+      // Rewrite only the line this project owns, so a hand-edited field
+      // survives a click here.
+      const { iconPaths } = await settings.get();
+      const key = projectName.toLowerCase();
+      const kept = iconPaths.split("\n").filter((line) => {
+        const split = line.indexOf("=");
+        if (split === -1) return line.trim() !== "";
+        return line.slice(0, split).trim().toLowerCase() !== key;
+      });
+      if (wanted !== "") kept.push(`${projectName} = ${wanted}`);
+      await settings.experimental_set({ iconPaths: kept.join("\n") });
+      await refreshAllIcons(true);
+      return { projects: await readProjects() };
     },
 
     view_delete: ({ id }) => {

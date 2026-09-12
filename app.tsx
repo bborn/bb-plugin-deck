@@ -1631,6 +1631,182 @@ function PaneHandle({
   );
 }
 
+/**
+ * The plugin's own settings page, under bb's declarative form. The declarative
+ * field is a single line-per-project text blob: fine as storage, useless as a
+ * UI, because it cannot show which projects exist, which already have a mark,
+ * or where that mark was found.
+ */
+function SettingsSection() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [views, setViews] = useState<View[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    rpc.call("inbox_get").then(
+      (next) => {
+        setProjects(next.projects);
+        setViews(next.views);
+      },
+      () => setProjects([]),
+    );
+  }, [rpc]);
+  useEffect(load, [load]);
+  useRealtime("inbox-changed", load);
+
+  const save = (project: Project) => {
+    const path = drafts[project.id] ?? project.iconOverride ?? "";
+    setSaving(project.id);
+    rpc.call("icon_override_set", { projectName: project.name, path }).then(
+      (next) => {
+        setProjects(next.projects);
+        setSaving(null);
+        toast.success(
+          path.trim() === ""
+            ? `Back to auto-detect for ${project.name}`
+            : `Icon set for ${project.name}`,
+        );
+      },
+      (cause: unknown) => {
+        setSaving(null);
+        toast.error(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+  };
+
+  if (projects === null) {
+    return <p className="text-sm text-muted-foreground">Loading…</p>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <section>
+        <h4 className="text-sm font-medium">Project icons</h4>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Each project shows its own mark, found automatically in conventional
+          places in its checkout, like{" "}
+          <code className="text-xs">public/icon.svg</code> or{" "}
+          <code className="text-xs">.github/logo.png</code>. Point one somewhere
+          else with a path relative to the project root. Leave it empty to go
+          back to auto-detect.
+        </p>
+        <ul className="mt-3 divide-y divide-border rounded-lg border border-border">
+          {projects.map((project) => (
+            <li key={project.id} className="flex items-center gap-3 p-3">
+              <ProjectMark
+                of={{
+                  projectName: project.name,
+                  projectHue: project.hue,
+                  projectIconUrl: project.iconUrl,
+                }}
+                className="size-6"
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{project.name}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {!project.hasCheckout
+                    ? "No checkout, so there is nowhere to look"
+                    : project.iconSource === null
+                      ? "No icon found"
+                      : project.iconOverride === null
+                        ? `Found at ${project.iconSource}`
+                        : `Set to ${project.iconSource}`}
+                </p>
+              </div>
+              {project.hasCheckout ? (
+                <>
+                  <Input
+                    value={drafts[project.id] ?? project.iconOverride ?? ""}
+                    placeholder="public/icon.svg"
+                    aria-label={`Icon path for ${project.name}`}
+                    className="h-8 w-56 font-mono text-xs"
+                    onChange={(event) =>
+                      setDrafts((current) => ({
+                        ...current,
+                        [project.id]: event.target.value,
+                      }))
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") save(project);
+                    }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={saving === project.id}
+                    onClick={() => save(project)}
+                  >
+                    {saving === project.id ? "Saving…" : "Save"}
+                  </Button>
+                </>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section>
+        <h4 className="text-sm font-medium">Saved views</h4>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Save one from the Inbox with <kbd className="font-mono text-xs">v</kbd>.
+          Number keys jump to them, in this order.
+        </p>
+        {views.length === 0 ? (
+          <p className="mt-3 rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+            None yet.
+          </p>
+        ) : (
+          <ul className="mt-3 divide-y divide-border rounded-lg border border-border">
+            {views.map((view, index) => (
+              <li key={view.id} className="flex items-center gap-3 p-3">
+                <span className="w-4 shrink-0 font-mono text-xs text-muted-foreground">
+                  {index + 1}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{view.name}</p>
+                  <p className="truncate font-mono text-xs text-muted-foreground">
+                    {view.query || "(everything)"} · {GROUP_BY_LABEL[view.display.groupBy]} ·{" "}
+                    {SORT_BY_LABEL[view.display.sortBy]}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={() => {
+                    rpc.call("view_delete", { id: view.id }).then(
+                      (next) => setViews(next.views),
+                      () => toast.error("Could not delete that view."),
+                    );
+                  }}
+                >
+                  Delete
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h4 className="text-sm font-medium">Keyboard</h4>
+        <dl className="mt-3 grid grid-cols-1 gap-x-8 gap-y-1.5 sm:grid-cols-2">
+          {SHORTCUTS.map((shortcut) => (
+            <div key={shortcut.keys} className="flex items-baseline gap-3 text-sm">
+              <dt className="w-28 shrink-0 font-mono text-xs text-muted-foreground">
+                {shortcut.keys}
+              </dt>
+              <dd className="min-w-0 flex-1">{shortcut.does}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+    </div>
+  );
+}
+
 function ShortcutSheet({ onClose }: { onClose: () => void }) {
   return (
     <div
@@ -1668,6 +1844,13 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 export default definePluginApp((app) => {
+  app.slots.settingsSection({
+    id: "settings",
+    title: "Inbox",
+    description:
+      "Project marks, saved views, and every key the Inbox binds.",
+    component: SettingsSection,
+  });
   app.slots.navPanel({
     id: "inbox",
     title: "Inbox",
