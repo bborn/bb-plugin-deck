@@ -1,18 +1,18 @@
-# bb-plugin-inbox
+# bb-plugin-deck
 
-**Inbox** for BB: one searchable list of every thread, with bb's own thread
+**Deck** for BB: one searchable list of every thread, with bb's own thread
 view beside it, so a context switch costs a keystroke instead of a navigation.
 
-![The Inbox: one list of every thread, grouped by what needs you, with the thread itself beside it](docs/screenshots/inbox.png)
+![The Deck: one list of every thread, grouped by what needs you, with the thread itself beside it](docs/screenshots/deck.png)
 
 - `server.ts` — tags, the agent's standing note, saved views, deep search, and
   project icons.
-- `app.tsx` — the Inbox page: the list, and bb's `ThreadChat` in the pane.
+- `app.tsx` — the Deck page: the list, and bb's `ThreadChat` in the pane.
 - `lib/query.ts`, `lib/display.ts`, `lib/project-visuals.ts`,
   `lib/icon-candidates.ts` — the search language, grouping and sorting, project
   marks, and the icon candidate list. All pure and unit-tested (`npm test`,
   Node's own runner, no framework).
-- `skills/inbox/SKILL.md` — the skill that tells agents to keep their note
+- `skills/deck/SKILL.md` — the skill that tells agents to keep their note
   current and to say what they are blocked on.
 
 ## Why it is not a board
@@ -21,7 +21,7 @@ It was a kanban board first. Columns turned out to be the wrong primitive: the
 states that matter are not assigned, they are facts about the thread, and
 nobody wants to drag work between lanes to keep a picture honest.
 
-So the inbox derives everything:
+So the deck derives everything:
 
 | State | Means |
 | --- | --- |
@@ -40,7 +40,7 @@ for a decision in prose would sit under Idle looking finished.
 
 You can dismiss that flag yourself with `d`, or from the pane. Only the agent
 could clear it at first, which meant one it forgot to clear pinned a thread to
-the top of the inbox for good.
+the top of the deck for good.
 
 ## Search
 
@@ -85,14 +85,14 @@ Pinned threads always lead, in their own group. Pinning is a deliberate act,
 and scattering pins through a project or day grouping would make the act
 pointless. The menu stays open while you click, so trying two groupings is one
 gesture instead of four. The choice is stored server-side, so it follows you
-between the inboxtop app and a browser, unlike the pane width, which is per
+between the decktop app and a browser, unlike the pane width, which is per
 device on purpose.
 
 ### What this deliberately does not duplicate
 
 bb's sidebar already organizes threads by project or machine and sorts by
 updated, created, or alphabetical. The overlap is real, and it is not the
-point. The sidebar organizes **browsing**: where is my checkout work. The inbox
+point. The sidebar organizes **browsing**: where is my checkout work. The deck
 organizes **triage**: what needs me, across everything. That is why its default
 grouping is by state, which the sidebar cannot do at all, and why a blocked
 thread in checkout and a blocked thread in analytics land in the same group
@@ -178,7 +178,7 @@ and `app/assets/images/logos/` full of integration partners, and showing
 another company’s mark as a project’s icon is worse than showing none. Zero-byte files
 are skipped too, because Rails ships empty placeholder favicons.
 
-Point the inbox at a mark it did not find with the **Project icon overrides**
+Point the deck at a mark it did not find with the **Project icon overrides**
 setting, one `project = repo/relative/path.svg` per line; editing it re-looks
 immediately. GitHub is not used as a source: owner avatars are the only icon it
 exposes, and one owner covers several repos, so they would all come out
@@ -186,7 +186,7 @@ identical.
 
 ## The mark
 
-`assets/inbox.svg`, an inbox tray. Two earlier attempts did not survive the
+`assets/deck.svg`, an deck tray. Two earlier attempts did not survive the
 sidebar:
 
 - `ListTodo`, the scaffold default, is a checklist, and his sidebar already had
@@ -199,14 +199,14 @@ The tray works because its silhouette is bold enough to survive the size, and
 because nothing else in that sidebar is a container. BB serves the file hashed
 and draws it as a `currentColor` mask, so it inherits the theme and needs no
 colour of its own. It is also declared under `bb.branding.experimental_icons`
-as `inbox`, so `task_note` and `task_tag` rows in a transcript carry the same
+as `deck`, so `task_note` and `task_tag` rows in a transcript carry the same
 mark.
 
 ## Settings
 
 ![Settings: project marks, saved views, and the binding editor](docs/screenshots/settings.png)
 
-The plugin's settings page (Settings, then Installed plugins, then Inbox) is a
+The plugin's settings page (Settings, then Installed plugins, then Deck) is a
 real page, not a text field:
 
 - **Project marks**, a row per project showing its icon and where it was found,

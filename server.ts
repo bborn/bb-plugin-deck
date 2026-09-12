@@ -1,6 +1,6 @@
-// bb-plugin-inbox — backend entry.
+// bb-plugin-deck — backend entry.
 //
-// This is not a board. It is an inbox: one searchable list of threads, and a
+// This is not a board. It is a deck: one searchable list of threads, and a
 // context pane for whichever one you are looking at. The states you care about
 // are derived from the thread itself (an agent is working, an agent is waiting
 // on you, it is done), never assigned by hand, so there is nothing to drag.
@@ -27,7 +27,7 @@ import {
 } from "./lib/icon-candidates.ts";
 
 /** Realtime channel app.tsx listens on for plugin-owned changes. */
-const INBOX_CHANGED = "inbox-changed";
+const DECK_CHANGED = "deck-changed";
 
 const MAX_TAGS = 12;
 const MAX_TAG_LENGTH = 32;
@@ -90,7 +90,7 @@ export type Hit = z.infer<typeof hitSchema>;
 export const rpcContract = defineRpcContract({
   // Everything the host's own live thread list cannot tell the page, in one
   // call: plugin-owned metadata, saved views, and project identity.
-  inbox_get: {
+  deck_get: {
     input: z.null(),
     output: z.object({
       meta: z.array(metaSchema),
@@ -111,7 +111,7 @@ export const rpcContract = defineRpcContract({
     output: z.object({ read: z.boolean() }),
   },
   // Only the agent could clear its own block, so a forgotten flag pinned a
-  // thread to the top of the inbox forever. You can clear it too.
+  // thread to the top of the deck forever. You can clear it too.
   block_clear: {
     input: z.object({ threadId: z.string() }),
     output: metaSchema,
@@ -279,7 +279,7 @@ export default async function plugin(bb: BbPluginApi) {
        created_at INTEGER NOT NULL
      )`,
     // The board's own note survived as thread_meta.note: it was already the
-    // agent's one-line "where this stands", which is what the inbox shows.
+    // agent's one-line "where this stands", which is what the deck shows.
     `INSERT OR IGNORE INTO thread_meta (thread_id, tags, note, blocked_on, updated_at)
        SELECT thread_id, NULL, note, NULL, updated_at
          FROM board_cards WHERE note IS NOT NULL`,
@@ -360,7 +360,7 @@ export default async function plugin(bb: BbPluginApi) {
       updatedAt: Date.now(),
     });
     const next = readMeta(threadId);
-    bb.realtime.publish(INBOX_CHANGED, { threadId });
+    bb.realtime.publish(DECK_CHANGED, { threadId });
     return next;
   }
 
@@ -533,7 +533,7 @@ export default async function plugin(bb: BbPluginApi) {
     upsertIcon.run(miss);
   }
 
-  /** Re-check every project, and tell open inboxes when anything changed. */
+  /** Re-check every project, and tell open decks when anything changed. */
   async function refreshAllIcons(force: boolean): Promise<void> {
     const projects = await bb.sdk.projects.list({ includePersonal: true });
     const known = new Map(
@@ -551,15 +551,15 @@ export default async function plugin(bb: BbPluginApi) {
       await refreshProjectIcon(project);
       if (before !== (selectIcon.get(project.id)?.sha256 ?? null)) changed = true;
     }
-    if (changed) bb.realtime.publish(INBOX_CHANGED, { icons: true });
+    if (changed) bb.realtime.publish(DECK_CHANGED, { icons: true });
   }
 
   async function readProjects(): Promise<Project[]> {
     const listed = await bb.sdk.projects.list({ includePersonal: true });
     const hues = projectHues(listed.map((project) => project.id));
     // A project the sweep has never seen gets looked at in the background. The
-    // inbox renders on its colour immediately and the icon arrives with the next
-    // "inbox-changed" signal rather than holding up this response.
+    // deck renders on its colour immediately and the icon arrives with the next
+    // "deck-changed" signal rather than holding up this response.
     if (listed.some((project) => selectIcon.get(project.id) === undefined)) {
       void refreshAllIcons(false).catch((cause: unknown) => {
         bb.log.warn(`icon lookup failed: ${String(cause)}`);
@@ -619,7 +619,7 @@ export default async function plugin(bb: BbPluginApi) {
   // --- RPC ----------------------------------------------------------------
 
   bb.rpc.register(rpcContract, {
-    inbox_get: async () => ({
+    deck_get: async () => ({
       meta: selectMeta.all().map((row) => toMeta(row, row.thread_id)),
       views: listViews(),
       projects: await readProjects(),
@@ -630,27 +630,27 @@ export default async function plugin(bb: BbPluginApi) {
     bindings_set: async ({ bindings }) => {
       const merged = resolveBindings(bindings);
       await bb.storage.kv.set("bindings", merged);
-      bb.realtime.publish(INBOX_CHANGED, { bindings: true });
+      bb.realtime.publish(DECK_CHANGED, { bindings: true });
       return { bindings: merged };
     },
 
     display_set: async (next) => {
       await bb.storage.kv.set("display", next);
       // No realtime publish: the window that changed it already has it, and
-      // republishing would make every other open inbox jump under the user.
+      // republishing would make every other open deck jump under the user.
       return next;
     },
 
     thread_unarchive: async ({ threadId }) => {
       await bb.sdk.threads.unarchive({ threadId });
-      bb.realtime.publish(INBOX_CHANGED, { threadId });
+      bb.realtime.publish(DECK_CHANGED, { threadId });
       return { restored: true };
     },
 
     thread_read: async ({ threadId, read }) => {
       if (read) await bb.sdk.threads.markRead({ threadId });
       else await bb.sdk.threads.markUnread({ threadId });
-      bb.realtime.publish(INBOX_CHANGED, { threadId });
+      bb.realtime.publish(DECK_CHANGED, { threadId });
       return { read };
     },
 
@@ -701,7 +701,7 @@ export default async function plugin(bb: BbPluginApi) {
         const views = selectViews.all();
         if (views.length >= MAX_VIEWS) {
           throw new Error(
-            `The inbox holds ${MAX_VIEWS} saved views, one per number key.`,
+            `The deck holds ${MAX_VIEWS} saved views, one per number key.`,
           );
         }
         insertView.run(
@@ -713,7 +713,7 @@ export default async function plugin(bb: BbPluginApi) {
           Date.now(),
         );
       }
-      bb.realtime.publish(INBOX_CHANGED, { views: true });
+      bb.realtime.publish(DECK_CHANGED, { views: true });
       return { views: listViews() };
     },
 
@@ -761,7 +761,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     view_delete: ({ id }) => {
       deleteView.run(id);
-      bb.realtime.publish(INBOX_CHANGED, { views: true });
+      bb.realtime.publish(DECK_CHANGED, { views: true });
       return { views: listViews() };
     },
   });
@@ -773,15 +773,15 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "task_note",
     description:
-      "Set this thread's standing one-line summary in the inbox: where the " +
+      "Set this thread's standing one-line summary in the deck: where the " +
       "work actually stands right now. Replace it whenever that changes. If " +
       "you are stuck waiting on the user, say what you need in blockedOn.",
     instructions:
       "Keep task_note current. It is the line the user reads to remember what " +
       "this thread is, so write it for someone who has not looked in a week.",
     presentation: {
-      label: { pending: "Updating the inbox", completed: "Updated the inbox" },
-      icon: { glyph: "inbox/inbox" },
+      label: { pending: "Updating the deck", completed: "Updated the deck" },
+      icon: { glyph: "deck/deck" },
     },
     parameters: z.object({
       note: z
@@ -812,7 +812,7 @@ export default async function plugin(bb: BbPluginApi) {
       "lowercase tags for the things a title does not already say.",
     presentation: {
       label: { pending: "Tagging the thread", completed: "Tagged the thread" },
-      icon: { glyph: "inbox/inbox" },
+      icon: { glyph: "deck/deck" },
     },
     parameters: z.object({
       add: z.array(z.string()).max(MAX_TAGS).optional(),
@@ -863,7 +863,7 @@ function toMeta(row: MetaRow | null, threadId: string): Meta {
       }
     } catch {
       // A row written by a future version, or a hand edit. Tags are decoration;
-      // losing them must never take the inbox down.
+      // losing them must never take the deck down.
       tags = [];
     }
   }

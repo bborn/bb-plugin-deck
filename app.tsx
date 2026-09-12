@@ -1,6 +1,6 @@
-// bb-plugin-inbox — frontend entry.
+// bb-plugin-deck — frontend entry.
 //
-// The inbox. One searchable list of threads on the left, the context you need
+// The deck. One searchable list of threads on the left, the context you need
 // to answer one of them on the right. No columns and nothing to drag: a
 // thread's state is read off the thread, so the only thing you do here is
 // find the right one, remember what it was, say something, and move on.
@@ -64,7 +64,7 @@ import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-/** A thread as the inbox sees it: host truth plus what this plugin knows. */
+/** A thread as the deck sees it: host truth plus what this plugin knows. */
 interface Row extends Matchable, Groupable {
   projectId: string;
   projectHue: number;
@@ -95,7 +95,7 @@ function stateOf(thread: PluginSidebarThread, blockedOn: string | null): State {
   // asked for a decision in prose would sit in "Idle" looking finished.
   if (blockedOn !== null) return "needs-me";
   // `indicator` is bb's own rolled-up "what is this thread doing" signal, so
-  // deriving from it keeps the inbox agreeing with the sidebar for free.
+  // deriving from it keeps the deck agreeing with the sidebar for free.
   if (
     thread.hasPendingInteraction ||
     thread.indicator === "waiting-for-input" ||
@@ -126,7 +126,7 @@ function relativeTime(at: number): string {
   return `${Math.round(days / 7)}w`;
 }
 
-interface InboxData {
+interface DeckData {
   meta: Meta[];
   views: View[];
   projects: Project[];
@@ -134,8 +134,8 @@ interface InboxData {
   bindings: Bindings;
 }
 
-const CACHE_KEY = "bb-plugin-inbox:cache:1";
-const COLLAPSED_KEY = "bb-plugin-inbox:collapsed:1";
+const CACHE_KEY = "bb-plugin-deck:cache:1";
+const COLLAPSED_KEY = "bb-plugin-deck:collapsed:1";
 
 /**
  * The last payload, read synchronously so the very first paint already has
@@ -143,11 +143,11 @@ const COLLAPSED_KEY = "bb-plugin-inbox:collapsed:1";
  * once with initials and default grouping, then again a round trip later,
  * which is the flicker.
  */
-function readCache(): InboxData | null {
+function readCache(): DeckData | null {
   try {
     const raw = globalThis.localStorage?.getItem(CACHE_KEY);
     if (raw == null) return null;
-    const parsed = JSON.parse(raw) as Partial<InboxData>;
+    const parsed = JSON.parse(raw) as Partial<DeckData>;
     if (!Array.isArray(parsed.projects)) return null;
     return {
       meta: Array.isArray(parsed.meta) ? parsed.meta : [],
@@ -161,7 +161,7 @@ function readCache(): InboxData | null {
   }
 }
 
-function useInbox() {
+function useDeck() {
   const rpc = useRpc<typeof rpcContract>();
   const cached = useRef(readCache()).current;
   const [meta, setMeta] = useState<Meta[]>(cached?.meta ?? []);
@@ -179,7 +179,7 @@ function useInbox() {
   const cacheKeyRef = useRef<string>("");
 
   const refetch = useCallback(() => {
-    rpc.call("inbox_get").then(
+    rpc.call("deck_get").then(
       (next) => {
         setMeta(next.meta);
         setViews(next.views);
@@ -209,7 +209,7 @@ function useInbox() {
   }, [rpc]);
 
   useEffect(refetch, [refetch]);
-  useRealtime("inbox-changed", refetch);
+  useRealtime("deck-changed", refetch);
 
   const changeDisplay = useCallback(
     (next: Display) => {
@@ -584,7 +584,7 @@ const MENU_ITEM =
 
 /**
  * Organize and Sort by, in bb's own sidebar wording so the two surfaces do not
- * teach different words. What differs is the default: the inbox groups by state,
+ * teach different words. What differs is the default: the deck groups by state,
  * which is the question it exists to answer.
  */
 function DisplayMenu({
@@ -761,11 +761,11 @@ function ThreadPane({
   );
 }
 
-function InboxPage({ subPath }: PluginNavPanelProps) {
+function DeckPage({ subPath }: PluginNavPanelProps) {
   const { threads, projects: hostProjects } = useSidebarThreads();
   const actions = useSidebarThreadActions();
   const { rpc, meta, views, projects, display, bindings, changeDisplay, setViews } =
-    useInbox();
+    useDeck();
   const [text, setText] = useState(() =>
     subPath === "" ? "" : decodeURIComponent(subPath),
   );
@@ -940,7 +940,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
     if (lastPushed.current === text) return;
     const timer = setTimeout(() => {
       lastPushed.current = text;
-      navigate.toPluginPanel("inbox", {
+      navigate.toPluginPanel("deck", {
         subPath: encodeURIComponent(text),
         replace: true,
       });
@@ -1137,7 +1137,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
         move(-1);
         return;
       }
-      // Inbox-wide keys come before the selection guard: with nothing matching
+      // Deck-wide keys come before the selection guard: with nothing matching
       // there is no selected row, and that is exactly when you need Escape and
       // the view keys to get you out again.
       if (action === "list") {
@@ -1564,7 +1564,7 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
   );
 }
 
-const LIST_WIDTH_KEY = "bb-plugin-inbox:list-width";
+const LIST_WIDTH_KEY = "bb-plugin-deck:list-width";
 const LIST_WIDTH_DEFAULT = 416;
 const LIST_WIDTH_MIN = 280;
 /** Leave at least this much for the context pane, whatever the window size. */
@@ -1900,7 +1900,7 @@ function SettingsSection() {
   const [bindings, setBindings] = useState<Bindings>(DEFAULT_BINDINGS);
 
   const load = useCallback(() => {
-    rpc.call("inbox_get").then(
+    rpc.call("deck_get").then(
       (next) => {
         setProjects(next.projects);
         setViews(next.views);
@@ -1910,7 +1910,7 @@ function SettingsSection() {
     );
   }, [rpc]);
   useEffect(load, [load]);
-  useRealtime("inbox-changed", load);
+  useRealtime("deck-changed", load);
 
   const save = (project: Project, path: string) => {
     setSaving(project.id);
@@ -1986,7 +1986,7 @@ function SettingsSection() {
 
       <Card
         title="Saved views"
-        hint="Save the search you are looking at from the Inbox. The number keys jump to them, in this order."
+        hint="Save the search you are looking at from the Deck. The number keys jump to them, in this order."
       >
         {views.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
@@ -2105,16 +2105,16 @@ function isTypingTarget(target: EventTarget | null): boolean {
 export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "settings",
-    title: "Inbox",
+    title: "Deck",
     description:
-      "Project marks, saved views, and every key the Inbox binds.",
+      "Project marks, saved views, and every key the Deck binds.",
     component: SettingsSection,
   });
   app.slots.navPanel({
-    id: "inbox",
-    title: "Inbox",
+    id: "deck",
+    title: "Deck",
     icon: "ListTodo",
-    path: "inbox",
-    component: InboxPage,
+    path: "deck",
+    component: DeckPage,
   });
 });

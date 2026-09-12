@@ -1,23 +1,24 @@
 {
-  "name": "bb-plugin-inbox",
+  "name": "bb-plugin-deck",
   "version": "0.1.0",
-  "description": "A BB plugin: one searchable inbox of every thread, with the context to answer one and move on.",
+  "description": "A BB plugin: your primary surface for every thread, with search, context, and a reply in one place.",
   "license": "MIT",
   "author": "Bruno Bornsztein",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bborn/bb-plugin-inbox.git"
+    "url": "git+https://github.com/bborn/bb-plugin-deck.git"
   },
-  "homepage": "https://github.com/bborn/bb-plugin-inbox#readme",
+  "homepage": "https://github.com/bborn/bb-plugin-deck#readme",
   "bugs": {
-    "url": "https://github.com/bborn/bb-plugin-inbox/issues"
+    "url": "https://github.com/bborn/bb-plugin-deck/issues"
   },
   "keywords": [
     "bb",
     "bb-plugin",
-    "inbox",
-    "triage",
+    "deck",
     "threads",
+    "triage",
+    "search",
     "agents"
   ],
   "type": "module",
@@ -41,12 +42,12 @@
     "LICENSE"
   ],
   "bb": {
-    "name": "Inbox",
-    "description": "One searchable inbox of every thread, with the context to answer one and move on.",
+    "name": "Deck",
+    "description": "Every thread on one deck, with the context to answer one and move on.",
     "branding": {
-      "icon": "./assets/inbox.svg",
+      "icon": "./assets/deck.svg",
       "experimental_icons": {
-        "inbox": "./assets/inbox.svg"
+        "deck": "./assets/deck.svg"
       }
     },
     "server": "./server.ts",

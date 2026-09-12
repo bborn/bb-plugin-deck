@@ -1,11 +1,11 @@
 ---
-name: inbox
-description: Keep this thread findable and legible on the user's Inbox. Use whenever you start real work, change what you are doing, get blocked on the user, or finish.
+name: deck
+description: Keep this thread findable and legible on the user's Deck. Use whenever you start real work, change what you are doing, get blocked on the user, or finish.
 ---
 
-# The inbox
+# The deck
 
-The user's Inbox is one searchable list of every thread. He uses it to context
+The user's Deck is one searchable list of every thread. He uses it to context
 switch: find a thread, remember in two seconds what it was, give you an
 instruction, and move on. Two things you write make that possible.
 
@@ -26,14 +26,14 @@ Bad: `"working on it"`, `"done"`, or a sentence about what you just read.
 ## Being blocked
 
 `task_note({ note: "...", blockedOn: "..." })` puts this thread at the top of
-his inbox under **Needs you**, in red. `blockedOn` is the one thing you need
+his deck under **Needs you**, in red. `blockedOn` is the one thing you need
 from him, stated so he can answer it without opening the thread.
 
 Good: `blockedOn: "the Stripe test key, or permission to skip that test"`
 Bad: `blockedOn: "feedback"`
 
 Omitting `blockedOn` on a later `task_note` clears the flag. Clear it as soon
-as you are unblocked, or the inbox lies to him.
+as you are unblocked, or the deck lies to him.
 
 ## Tags
 

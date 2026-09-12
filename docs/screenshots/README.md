@@ -17,6 +17,6 @@ two thread lists side by side reads as a bug rather than a feature.
 
 | File | Shows |
 | --- | --- |
-| `inbox.png` | The list, all four states, with a thread selected. |
+| `deck.png` | The list, all four states, with a thread selected. |
 | `keyboard.png` | The `?` sheet, rendered from the live bindings. |
 | `settings.png` | Project marks, saved views, and the binding editor. |
