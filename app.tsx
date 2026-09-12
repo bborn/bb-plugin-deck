@@ -72,6 +72,35 @@ interface Row extends Matchable, Groupable {
   blockedOn: string | null;
 }
 
+/**
+ * Both column headers are pinned to one height so their bottom borders line
+ * up. Their contents differ and the right one grows with the agent's note, so
+ * without this the two rules sit a dozen pixels apart.
+ */
+const HEADER_CLASS =
+  "flex h-[5.25rem] shrink-0 flex-col justify-center gap-2 overflow-hidden border-b border-border";
+
+/**
+ * The filter rides in the route, and bb percent-encodes the segment itself.
+ * Encoding before handing it over produced a double-encoded path that came
+ * back as literal "%5Bmarketing-site%5D", which then matched nothing. Decode
+ * until it stops changing, so either shape reads correctly.
+ */
+function decodeSubPath(raw: string): string {
+  let text = raw;
+  for (let pass = 0; pass < 3; pass += 1) {
+    let next: string;
+    try {
+      next = decodeURIComponent(text);
+    } catch {
+      return text;
+    }
+    if (next === text) return text;
+    text = next;
+  }
+  return text;
+}
+
 const SEARCH_PLACEHOLDER = "Find anything: ENG-482, #1284, a branch, [project]";
 
 /**
@@ -471,11 +500,13 @@ function SearchBar({
   onChange,
   projectNames,
   inputRef,
+  onSubmit,
 }: {
   value: string;
   onChange: (next: string) => void;
   projectNames: readonly string[];
   inputRef: RefObject<HTMLInputElement | null>;
+  onSubmit: () => void;
 }) {
   const parsed = useMemo(() => parseQuery(value), [value]);
   const suggestions = useMemo(
@@ -509,6 +540,13 @@ function SearchBar({
     if (open && (event.key === "Enter" || event.key === "Tab")) {
       event.preventDefault();
       complete(suggestions[highlighted] ?? suggestions[0]!);
+      return;
+    }
+    // With no suggestion to take, Enter means "I am done typing this filter":
+    // commit it and hand over the list, so the arrow keys work straight away.
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onSubmit();
       return;
     }
     if (event.key === "Escape") {
@@ -705,7 +743,7 @@ function ThreadPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 border-b border-border px-4 py-2.5">
+      <div className={cn(HEADER_CLASS, "justify-center gap-1 px-4")}>
         <h2 className="truncate text-sm font-medium">{row.title}</h2>
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           <ProjectMark of={row} />
@@ -767,7 +805,7 @@ function DeckPage({ subPath }: PluginNavPanelProps) {
   const { rpc, meta, views, projects, display, bindings, changeDisplay, setViews } =
     useDeck();
   const [text, setText] = useState(() =>
-    subPath === "" ? "" : decodeURIComponent(subPath),
+    subPath === "" ? "" : decodeSubPath(subPath),
   );
   // The cursor walks headers AND rows, the way a tree does: a folded group has
   // no rows to land on, so its header has to be a stop or you can never reopen
@@ -941,7 +979,8 @@ function DeckPage({ subPath }: PluginNavPanelProps) {
     const timer = setTimeout(() => {
       lastPushed.current = text;
       navigate.toPluginPanel("deck", {
-        subPath: encodeURIComponent(text),
+        // bb encodes the segment; encoding here too is what double-encoded it.
+        subPath: text,
         replace: true,
       });
     }, 400);
@@ -1018,7 +1057,13 @@ function DeckPage({ subPath }: PluginNavPanelProps) {
   useEffect(() => {
     if (composerWanted.current || shownThreadId === null) return;
     const timer = setTimeout(() => {
-      if (!composerWanted.current) listRef.current?.focus();
+      // Only take focus back from the chat, which grabs it whenever its thread
+      // changes. Typing anywhere else also changes the selection, and yanking
+      // the caret out of a field mid-word is how "[ofl then Enter" ended up
+      // doing nothing at all.
+      if (composerWanted.current) return;
+      if (isTypingTarget(document.activeElement)) return;
+      listRef.current?.focus();
     }, 120);
     return () => clearTimeout(timer);
   }, [shownThreadId]);
@@ -1346,7 +1391,7 @@ function DeckPage({ subPath }: PluginNavPanelProps) {
           focusSide === "list" ? "bg-background" : "bg-muted/20",
         )}
       >
-        <div className="space-y-2 border-b border-border px-3 py-2.5">
+        <div className={cn(HEADER_CLASS, "px-3")}>
           <div className="flex items-center gap-1">
             <div className="min-w-0 flex-1">
               <SearchBar
@@ -1354,6 +1399,7 @@ function DeckPage({ subPath }: PluginNavPanelProps) {
                 onChange={setText}
                 projectNames={projects.map((project) => project.name)}
                 inputRef={searchRef}
+                onSubmit={focusList}
               />
             </div>
             <DisplayMenu display={display} onChange={changeDisplay} />
