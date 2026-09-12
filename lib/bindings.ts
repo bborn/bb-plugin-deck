@@ -19,6 +19,7 @@ export type ActionId =
   | "pin"
   | "read"
   | "pull-request"
+  | "block-clear"
   | "group-cycle"
   | "sort-cycle"
   | "unread-first"
@@ -59,6 +60,7 @@ export const ACTIONS: readonly ActionSpec[] = [
   { id: "pin", label: "Pin or unpin", scope: "list", group: "Acting" },
   { id: "read", label: "Mark read or unread", scope: "list", group: "Acting" },
   { id: "pull-request", label: "Open the pull request", scope: "list", group: "Acting" },
+  { id: "block-clear", label: "Dismiss \"waiting on you\"", scope: "list", group: "Acting" },
   { id: "group-cycle", label: "Cycle grouping", scope: "global", group: "Organising" },
   { id: "sort-cycle", label: "Cycle sorting", scope: "global", group: "Organising" },
   { id: "unread-first", label: "Toggle unread first", scope: "list", group: "Organising" },
@@ -88,6 +90,7 @@ export const DEFAULT_BINDINGS: Bindings = {
   pin: ["p"],
   read: ["m"],
   "pull-request": ["."],
+  "block-clear": ["d"],
   "group-cycle": ["g", "mod+shift+g"],
   "sort-cycle": ["s", "mod+shift+s"],
   "unread-first": ["f"],

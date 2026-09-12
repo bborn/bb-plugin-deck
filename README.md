@@ -36,6 +36,10 @@ An agent declaring `blockedOn` through `task_note` counts as Needs you. bb only
 knows about its own interaction prompts, so without that a thread that asked
 for a decision in prose would sit under Idle looking finished.
 
+You can dismiss that flag yourself with `d`, or from the pane. Only the agent
+could clear it at first, which meant one it forgot to clear pinned a thread to
+the top of the inbox for good.
+
 ## Search
 
 One box. Tokens combine with AND, except `is:`, which is OR because "blocked or
@@ -117,7 +121,7 @@ the list and the composer, and two keys move between them.
 | `←` `→` `c` | Up to the group header, fold, unfold, toggle. |
 | `/` | Search. Arrows still move the list from inside the box. |
 | `⏎` `o` | Open the thread, or open it in a split. |
-| `e` `u` `p` `m` `.` | Archive, undo, pin, read/unread, open the PR. |
+| `e` `u` `p` `m` `.` `d` | Archive, undo, pin, read/unread, open the PR, dismiss a block. |
 | `g` `s` `f` | Cycle grouping, cycle sorting, unread first. `⌘⇧G` and `⌘⇧S` also work while typing. |
 | `v` `x` `1`-`9` | Save a view, delete the view you are in, jump to one. |
 | `[` `]` `\` | Narrow, widen, reset the split. |
@@ -199,15 +203,16 @@ mark.
 The plugin's settings page (Settings, then Installed plugins, then Inbox) is a
 real page, not a text field:
 
-- **Project icons**, a row per project showing its mark, where the icon was
-  found, and a box to point it somewhere else. Empty means auto-detect.
+- **Project marks**, a row per project showing its icon and where it was found,
+  with a picker that searches that project's own files. The search is scoped to
+  the checkout, since a path outside it is not something this can store.
 - **Saved views**, listed in number-key order, each deletable.
 - **Keyboard**, the same table the in-app `?` sheet renders from.
 
-The declarative `Project icon overrides` field above it is the storage behind
-that page, `project = repo/relative/path.svg` one per line. Editing it by hand
-still works, and the page rewrites only the line for the project you changed.
-Paths are rejected unless they are relative, inside the project, and an image.
+Overrides live in the plugin's own storage, not in a declared setting. A
+settings descriptor renders a raw text field, and a raw field sitting beside a
+real editor for the same data is two ways to say one thing. Paths are still
+rejected unless they are relative, inside the project, and an image.
 
 ## UI components
 

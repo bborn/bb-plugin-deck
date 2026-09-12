@@ -403,8 +403,10 @@ function ThreadRow({
           </div>
         ) : null}
         {row.blockedOn !== null ? (
-          <p className="mt-1.5 pl-[1.125rem] text-xs text-destructive">
-            Waiting on you: {row.blockedOn}
+          <p className="mt-1.5 truncate pl-[1.125rem] text-xs text-muted-foreground">
+            <span className="text-destructive/80">Waiting on you</span>
+            {" · "}
+            {row.blockedOn}
           </p>
         ) : row.note !== null ? (
           <p className="mt-1.5 truncate pl-[1.125rem] text-xs text-muted-foreground">
@@ -633,10 +635,12 @@ function ThreadPane({
   row,
   focusRequest,
   onPullRequest,
+  onDismiss,
 }: {
   row: Row | null;
   focusRequest: number;
   onPullRequest: (url: string | null) => void;
+  onDismiss: (threadId: string) => void;
 }) {
   const pullRequest = useSidebarThreadPullRequest(row?.threadId ?? "").pullRequest;
   const navigate = useBbNavigate();
@@ -678,8 +682,18 @@ function ThreadPane({
           ))}
         </div>
         {row.blockedOn !== null ? (
-          <p className="mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
-            Waiting on you: {row.blockedOn}
+          <p className="group/block mt-2 flex items-baseline gap-1.5 border-l-2 border-destructive/60 pl-2.5 text-xs leading-relaxed">
+            <span className="shrink-0 text-destructive/80">Waiting on you</span>
+            <span className="min-w-0 flex-1 text-muted-foreground">
+              {row.blockedOn}
+            </span>
+            <button
+              type="button"
+              onClick={() => onDismiss(row.threadId)}
+              className="shrink-0 text-muted-foreground underline-offset-2 opacity-0 transition-opacity hover:underline focus-visible:opacity-100 group-hover/block:opacity-100"
+            >
+              Dismiss
+            </button>
           </p>
         ) : row.note !== null ? (
           <p className="mt-2 text-xs text-muted-foreground">{row.note}</p>
@@ -1235,6 +1249,16 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
       } else if (action === "pull-request") {
         event.preventDefault();
         openPullRequest();
+      } else if (action === "block-clear") {
+        event.preventDefault();
+        if (selected.blockedOn === null) {
+          toast("Nothing is waiting on you there.");
+          return;
+        }
+        rpc.call("block_clear", { threadId: selected.threadId }).then(
+          () => toast.success("Dismissed"),
+          () => toast.error("Could not dismiss that."),
+        );
       }
     };
     document.addEventListener("keydown", onKeyDown);
@@ -1508,6 +1532,12 @@ function InboxPage({ subPath }: PluginNavPanelProps) {
           onPullRequest={(url) => {
             pullRequestUrl.current = url;
           }}
+          onDismiss={(threadId) => {
+            rpc.call("block_clear", { threadId }).then(
+              () => toast.success("Dismissed"),
+              () => toast.error("Could not dismiss that."),
+            );
+          }}
         />
       </div>
     </div>
@@ -1748,11 +1778,104 @@ function BindingRow({
   );
 }
 
+function IconPicker({
+  project,
+  onPick,
+}: {
+  project: Project;
+  onPick: (path: string) => void;
+}) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [query, setQuery] = useState(project.iconOverride ?? "");
+  const [paths, setPaths] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setBusy(true);
+    const timer = setTimeout(() => {
+      rpc.call("icon_candidates", { projectId: project.id, query }).then(
+        (next) => {
+          setPaths(next.paths);
+          setBusy(false);
+        },
+        () => setBusy(false),
+      );
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [rpc, project.id, query, open]);
+
+  return (
+    <div className="relative w-72 shrink-0">
+      <Input
+        value={query}
+        placeholder="Search this project for an image"
+        aria-label={`Icon for ${project.name}`}
+        className="h-8 font-mono text-xs"
+        onFocus={() => setOpen(true)}
+        // A click inside the list fires before blur would close it, so the
+        // close is deferred rather than immediate.
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        onChange={(event) => setQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onPick(query.trim());
+            setOpen(false);
+          }
+          if (event.key === "Escape") setOpen(false);
+        }}
+      />
+      {open ? (
+        <div className="absolute right-0 top-9 z-20 max-h-64 w-96 overflow-y-auto rounded-lg border border-border bg-card py-1 shadow-md">
+          {query.trim() !== "" ? (
+            <button
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onPick("");
+                setQuery("");
+                setOpen(false);
+              }}
+              className="w-full px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted"
+            >
+              Clear, and go back to auto-detect
+            </button>
+          ) : null}
+          {busy && paths.length === 0 ? (
+            <p className="px-3 py-2 text-xs text-muted-foreground">Looking…</p>
+          ) : paths.length === 0 ? (
+            <p className="px-3 py-2 text-xs text-muted-foreground">
+              No images match. Type part of a filename.
+            </p>
+          ) : (
+            paths.map((path) => (
+              <button
+                key={path}
+                type="button"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  setQuery(path);
+                  onPick(path);
+                  setOpen(false);
+                }}
+                className="block w-full truncate px-3 py-1.5 text-left font-mono text-xs hover:bg-muted"
+              >
+                {path}
+              </button>
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SettingsSection() {
   const rpc = useRpc<typeof rpcContract>();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [views, setViews] = useState<View[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [bindings, setBindings] = useState<Bindings>(DEFAULT_BINDINGS);
 
@@ -1769,8 +1892,7 @@ function SettingsSection() {
   useEffect(load, [load]);
   useRealtime("inbox-changed", load);
 
-  const save = (project: Project) => {
-    const path = drafts[project.id] ?? project.iconOverride ?? "";
+  const save = (project: Project, path: string) => {
     setSaving(project.id);
     rpc.call("icon_override_set", { projectName: project.name, path }).then(
       (next) => {
@@ -1808,7 +1930,7 @@ function SettingsSection() {
     <div className="space-y-4">
       <Card
         title="Project marks"
-        hint="Each project shows its own icon, found automatically in conventional places in its checkout. Point one somewhere else with a path relative to the project root, or leave it empty to go back to auto-detect."
+        hint="Each project shows its own icon, found automatically in conventional places in its checkout. To use a different one, search that project's files and pick it. The search only covers the project itself, since a path outside it is not something this can store."
       >
         <ul className="divide-y divide-border">
           {projects.map((project) => (
@@ -1832,32 +1954,10 @@ function SettingsSection() {
                 </p>
               </div>
               {project.hasCheckout ? (
-                <>
-                  <Input
-                    value={drafts[project.id] ?? project.iconOverride ?? ""}
-                    placeholder="public/icon.svg"
-                    aria-label={`Icon path for ${project.name}`}
-                    className="h-8 w-64 font-mono text-xs"
-                    onChange={(event) =>
-                      setDrafts((current) => ({
-                        ...current,
-                        [project.id]: event.target.value,
-                      }))
-                    }
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") save(project);
-                    }}
-                  />
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    className="w-20 shrink-0"
-                    disabled={saving === project.id}
-                    onClick={() => save(project)}
-                  >
-                    {saving === project.id ? "Saving…" : "Save"}
-                  </Button>
-                </>
+                <IconPicker
+                  project={project}
+                  onPick={(path) => save(project, path)}
+                />
               ) : null}
             </li>
           ))}

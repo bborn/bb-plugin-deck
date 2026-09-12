@@ -110,6 +110,12 @@ export const rpcContract = defineRpcContract({
     input: z.object({ threadId: z.string(), read: z.boolean() }),
     output: z.object({ read: z.boolean() }),
   },
+  // Only the agent could clear its own block, so a forgotten flag pinned a
+  // thread to the top of the inbox forever. You can clear it too.
+  block_clear: {
+    input: z.object({ threadId: z.string() }),
+    output: metaSchema,
+  },
   tag_toggle: {
     input: z.object({
       threadId: z.string(),
@@ -144,6 +150,16 @@ export const rpcContract = defineRpcContract({
   },
   // Per-project icon override, so the settings page can be a row per project
   // rather than a text blob whose syntax the user has to learn.
+  // Image files under a project's checkout, for the settings picker. Scoped to
+  // the repo on purpose: a native file dialog would happily return a path
+  // outside it, which is not a thing this setting can store.
+  icon_candidates: {
+    input: z.object({
+      projectId: z.string(),
+      query: z.string().max(120),
+    }),
+    output: z.object({ paths: z.array(z.string()) }),
+  },
   icon_override_set: {
     input: z.object({
       projectName: z.string().min(1),
@@ -180,20 +196,14 @@ interface IconRow {
 }
 
 export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
-    iconPaths: {
-      type: "string",
-      label: "Project icon overrides (edited above, one `project = path` per line)",
-      experimental_multiline: true,
-      default: "",
-      // One `project = repo/relative/path.svg` per line. Detection only looks
-      // in conventional places, so this is the escape hatch for a repo that
-      // keeps its mark somewhere else.
-      experimental_schema: z
-        .string()
-        .max(4096, "Keep the overrides under 4096 characters."),
-    },
-  });
+  // Overrides live in plugin storage, not in a declared setting: a settings
+  // descriptor renders a raw field, and a raw field beside a real editor for
+  // the same data is two ways to say one thing.
+  async function readOverrides(): Promise<Map<string, string>> {
+    return parseIconOverrides(
+      (await bb.storage.kv.get<string>("iconOverrides")) ?? "",
+    );
+  }
 
   const db: Database = bb.storage.database();
   // Append-only: never reorder or edit a shipped statement, only push new ones.
@@ -470,10 +480,7 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
 
-    const { iconPaths } = await settings.get();
-    const override = parseIconOverrides(iconPaths).get(
-      project.name.toLowerCase(),
-    );
+    const override = (await readOverrides()).get(project.name.toLowerCase());
     const candidates =
       override !== undefined && isSafeRelativePath(override)
         ? [override, ...ICON_CANDIDATES]
@@ -558,8 +565,7 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`icon lookup failed: ${String(cause)}`);
       });
     }
-    const { iconPaths } = await settings.get();
-    const overrides = parseIconOverrides(iconPaths);
+    const overrides = await readOverrides();
     return listed
       .map((project) => ({
         id: project.id,
@@ -609,14 +615,6 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.schedule("icon-refresh", "17 4 * * *", async () => {
     await refreshAllIcons(true);
   });
-  // An override is useless if it waits for the daily sweep, so editing one
-  // re-looks immediately. Only that field forces the work.
-  settings.onChange((next, previous) => {
-    if (next.iconPaths === previous.iconPaths) return;
-    void refreshAllIcons(true).catch((cause: unknown) => {
-      bb.log.warn(`icon refresh after settings change failed: ${String(cause)}`);
-    });
-  });
 
   // --- RPC ----------------------------------------------------------------
 
@@ -655,6 +653,8 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish(INBOX_CHANGED, { threadId });
       return { read };
     },
+
+    block_clear: ({ threadId }) => writeMeta(threadId, { blockedOn: null }),
 
     tag_toggle: ({ threadId, tag }) => {
       const wanted = normalizeTag(tag);
@@ -717,6 +717,29 @@ export default async function plugin(bb: BbPluginApi) {
       return { views: listViews() };
     },
 
+    icon_candidates: async ({ projectId, query }) => {
+      const listed = await bb.sdk.projects.list({ includePersonal: true });
+      const project = listed.find((candidate) => candidate.id === projectId);
+      const source = project === undefined ? null : localSource(project);
+      if (source === null) return { paths: [] };
+      const found = await bb.sdk.files
+        .list({
+          hostId: source.hostId,
+          path: source.path,
+          query: query.trim() === "" ? "icon" : query.trim(),
+          limit: 200,
+        })
+        .catch(() => ({ files: [] as { name: string; path: string }[] }));
+      const root = source.path.endsWith("/") ? source.path : `${source.path}/`;
+      const paths = found.files
+        .map((file) =>
+          file.path.startsWith(root) ? file.path.slice(root.length) : file.path,
+        )
+        .filter((path) => isSafeRelativePath(path))
+        .slice(0, 40);
+      return { paths: [...new Set(paths)] };
+    },
+
     icon_override_set: async ({ projectName, path }) => {
       const wanted = path.trim();
       if (wanted !== "" && !isSafeRelativePath(wanted)) {
@@ -724,17 +747,14 @@ export default async function plugin(bb: BbPluginApi) {
           "Use a relative path to an image inside the project, like public/icon.svg.",
         );
       }
-      // Rewrite only the line this project owns, so a hand-edited field
-      // survives a click here.
-      const { iconPaths } = await settings.get();
+      const overrides = await readOverrides();
       const key = projectName.toLowerCase();
-      const kept = iconPaths.split("\n").filter((line) => {
-        const split = line.indexOf("=");
-        if (split === -1) return line.trim() !== "";
-        return line.slice(0, split).trim().toLowerCase() !== key;
-      });
-      if (wanted !== "") kept.push(`${projectName} = ${wanted}`);
-      await settings.experimental_set({ iconPaths: kept.join("\n") });
+      if (wanted === "") overrides.delete(key);
+      else overrides.set(key, wanted);
+      await bb.storage.kv.set(
+        "iconOverrides",
+        [...overrides].map(([name, path]) => `${name} = ${path}`).join("\n"),
+      );
       await refreshAllIcons(true);
       return { projects: await readProjects() };
     },
