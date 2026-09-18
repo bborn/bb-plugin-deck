@@ -9,19 +9,28 @@
 // and costs no round trip. The backend only supplies what the host does not:
 // tags, the agent's standing note, saved views, and search that reaches
 // archived threads and message bodies.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent, RefObject } from "react";
 import {
-  ThreadChat,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import type { KeyboardEvent, ReactNode, RefObject } from "react";
+import {
   definePluginApp,
   experimental_useSidebarThreadActions as useSidebarThreadActions,
   experimental_useSidebarThreadPullRequest as useSidebarThreadPullRequest,
+  experimental_useSidebarThreadSplit as useSidebarThreadSplit,
   experimental_useSidebarThreads as useSidebarThreads,
   useBbNavigate,
   useRealtime,
   useRpc,
-  type PluginNavPanelProps,
   type PluginSidebarThread,
+  type PluginSidebarThreadActivity,
+  type PluginSidebarThreadIndicator,
+  type PluginThreadListProps,
 } from "@get-bb/plugin-sdk/app";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { toast } from "sonner";
@@ -35,8 +44,10 @@ import {
 } from "@/lib/query";
 import {
   DEFAULT_DISPLAY,
+  DEFAULT_SESSION,
   GROUP_BY_LABEL,
   parseDisplay,
+  parseSession,
   SORT_BY_LABEL,
   displayBranch,
   cycleGroupBy,
@@ -45,6 +56,7 @@ import {
   type Display,
   type GroupBy,
   type Groupable,
+  type Session,
   type SortBy,
 } from "@/lib/display";
 import {
@@ -60,7 +72,7 @@ import {
 } from "@/lib/bindings";
 import { colorForHue, projectInitials } from "@/lib/project-visuals";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Icon, type IconName } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
@@ -70,35 +82,18 @@ interface Row extends Matchable, Groupable {
   projectHue: number;
   projectIconUrl: string | null;
   blockedOn: string | null;
-}
-
-/**
- * Both column headers are pinned to one height so their bottom borders line
- * up. Their contents differ and the right one grows with the agent's note, so
- * without this the two rules sit a dozen pixels apart.
- */
-const HEADER_CLASS =
-  "flex h-[5.25rem] shrink-0 flex-col justify-center gap-2 overflow-hidden border-b border-border";
-
-/**
- * The filter rides in the route, and bb percent-encodes the segment itself.
- * Encoding before handing it over produced a double-encoded path that came
- * back as literal "%5Bmarketing-site%5D", which then matched nothing. Decode
- * until it stops changing, so either shape reads correctly.
- */
-function decodeSubPath(raw: string): string {
-  let text = raw;
-  for (let pass = 0; pass < 3; pass += 1) {
-    let next: string;
-    try {
-      next = decodeURIComponent(text);
-    } catch {
-      return text;
-    }
-    if (next === text) return text;
-    text = next;
-  }
-  return text;
+  /** Forked and spawned threads nest under this, the way bb's own list does. */
+  parentThreadId: string | null;
+  /**
+   * bb's own rolled-up signal and its live counts, carried through rather than
+   * flattened. `state` still answers "does this need me", but it collapses
+   * five kinds of busy into one; these say which kind, the way bb's sidebar
+   * does. `indicatorLabel` is bb's accessible wording — reuse it verbatim so
+   * screen readers hear the same thing in both lists.
+   */
+  indicator: PluginSidebarThreadIndicator;
+  indicatorLabel: string | null;
+  activity: PluginSidebarThreadActivity;
 }
 
 const SEARCH_PLACEHOLDER = "Find anything: ENG-482, #1284, a branch, [project]";
@@ -160,11 +155,14 @@ interface DeckData {
   views: View[];
   projects: Project[];
   display: Display;
+  session: Session;
   bindings: Bindings;
 }
 
 const CACHE_KEY = "bb-plugin-deck:cache:1";
-const COLLAPSED_KEY = "bb-plugin-deck:collapsed:1";
+
+/** How long typing has to stop before the search box is written down. */
+const SESSION_WRITE_DELAY_MS = 500;
 
 /**
  * The last payload, read synchronously so the very first paint already has
@@ -183,6 +181,7 @@ function readCache(): DeckData | null {
       views: Array.isArray(parsed.views) ? parsed.views : [],
       projects: parsed.projects,
       display: parseDisplay(parsed.display),
+      session: parseSession(parsed.session),
       bindings: resolveBindings(parsed.bindings),
     };
   } catch {
@@ -199,56 +198,132 @@ function useDeck() {
   const [display, setDisplay] = useState<Display>(
     cached?.display ?? DEFAULT_DISPLAY,
   );
+  const [session, setSession] = useState<Session>(
+    cached?.session ?? DEFAULT_SESSION,
+  );
   const [bindings, setBindings] = useState<Bindings>(
     cached?.bindings ?? DEFAULT_BINDINGS,
   );
-  // The server is authoritative until the first load lands; after that the
-  // window owns its own display so a refetch cannot yank a setting back.
+  // The server is authoritative until the first load lands or you touch one of
+  // these yourself, whichever comes first; after that the window owns its own
+  // display and session so a refetch cannot yank a setting back or retype the
+  // search box under you.
   const loaded = useRef(false);
+  const displayRef = useRef(display);
+  displayRef.current = display;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const cacheRef = useRef<DeckData | null>(cached);
   const cacheKeyRef = useRef<string>("");
+
+  // Only write when something actually moved, so a realtime signal does not
+  // churn storage on every keystroke elsewhere in the app.
+  const saveCache = useCallback((next: DeckData) => {
+    cacheRef.current = next;
+    const encoded = JSON.stringify(next);
+    if (encoded === cacheKeyRef.current) return;
+    cacheKeyRef.current = encoded;
+    try {
+      globalThis.localStorage?.setItem(CACHE_KEY, encoded);
+    } catch {
+      // A browser with storage off still works, just without the instant
+      // first paint.
+    }
+  }, []);
+
+  /**
+   * Fold a local change into the cached payload. Without this the next paint
+   * starts from whatever the last fetch saw — the old grouping, the empty
+   * search box — and only corrects a round trip later, which is the flicker
+   * this cache exists to prevent.
+   */
+  const patchCache = useCallback(
+    (patch: Partial<DeckData>) => {
+      const base = cacheRef.current;
+      if (base === null) return;
+      saveCache({ ...base, ...patch });
+    },
+    [saveCache],
+  );
 
   const refetch = useCallback(() => {
     rpc.call("deck_get").then(
       (next) => {
+        const merged = resolveBindings(next.bindings);
         setMeta(next.meta);
         setViews(next.views);
         setProjects(next.projects);
-        setBindings(resolveBindings(next.bindings));
+        setBindings(merged);
         if (!loaded.current) {
           setDisplay(next.display);
+          setSession(next.session);
           loaded.current = true;
-        }
-        // Only write when something actually moved, so a realtime signal does
-        // not churn storage on every keystroke elsewhere in the app.
-        const encoded = JSON.stringify(next);
-        if (encoded !== cacheKeyRef.current) {
-          cacheKeyRef.current = encoded;
-          try {
-            globalThis.localStorage?.setItem(CACHE_KEY, encoded);
-          } catch {
-            // A browser with storage off still works, just without the
-            // instant first paint.
-          }
+          saveCache({ ...next, bindings: merged });
+        } else {
+          // Ours are newer than anything this response can carry, and a write
+          // in flight may not be in it at all.
+          saveCache({
+            ...next,
+            bindings: merged,
+            display: displayRef.current,
+            session: sessionRef.current,
+          });
         }
       },
       (cause: unknown) => {
         toast.error(cause instanceof Error ? cause.message : String(cause));
       },
     );
-  }, [rpc]);
+  }, [rpc, saveCache]);
 
   useEffect(refetch, [refetch]);
   useRealtime("deck-changed", refetch);
 
   const changeDisplay = useCallback(
     (next: Display) => {
+      loaded.current = true;
       setDisplay(next);
+      patchCache({ display: next });
       rpc.call("display_set", next).catch(() => {
         toast.error("Could not save that display setting.");
       });
     },
-    [rpc],
+    [rpc, patchCache],
   );
+
+  // The session moves on every keystroke, so it is written once the typing
+  // stops rather than per character.
+  const pendingSession = useRef<Session | null>(null);
+  const sessionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushSession = useCallback(() => {
+    if (sessionTimer.current !== null) {
+      clearTimeout(sessionTimer.current);
+      sessionTimer.current = null;
+    }
+    const next = pendingSession.current;
+    if (next === null) return;
+    pendingSession.current = null;
+    // Quiet on failure: this fires while you type, and a toast per keystroke
+    // would be worse than losing the last word of a search.
+    rpc.call("session_set", next).catch(() => undefined);
+  }, [rpc]);
+
+  const changeSession = useCallback(
+    (next: Session) => {
+      loaded.current = true;
+      setSession(next);
+      patchCache({ session: next });
+      pendingSession.current = next;
+      if (sessionTimer.current !== null) clearTimeout(sessionTimer.current);
+      sessionTimer.current = setTimeout(flushSession, SESSION_WRITE_DELAY_MS);
+    },
+    [flushSession, patchCache],
+  );
+
+  // Leaving the deck is exactly the moment the session has to be saved, and
+  // it is also the moment the debounce would otherwise be thrown away.
+  useEffect(() => flushSession, [flushSession]);
 
   return {
     rpc,
@@ -256,8 +331,10 @@ function useDeck() {
     views,
     projects,
     display,
+    session,
     bindings,
     changeDisplay,
+    changeSession,
     setViews,
     refetch,
   };
@@ -305,6 +382,7 @@ function useRows(
           projectName: project?.name ?? hostProject?.name ?? "Unknown",
           projectHue: project?.hue ?? 0,
           projectIconUrl: project?.iconUrl ?? null,
+          parentThreadId: thread.parentThreadId,
           branchName: thread.environment?.branchName ?? null,
           prNumber: null,
           prTitle: null,
@@ -312,6 +390,9 @@ function useRows(
           note: own?.note ?? null,
           blockedOn: own?.blockedOn ?? null,
           state: stateOf(thread, own?.blockedOn ?? null),
+          indicator: thread.indicator,
+          indicatorLabel: thread.indicatorLabel,
+          activity: thread.activity,
           createdAt: thread.createdAt,
           updatedAt: thread.updatedAt,
           isUnread: thread.isUnread,
@@ -320,6 +401,165 @@ function useRows(
       }),
     [threads, projectById, metaById, hostProjects],
   );
+}
+
+/**
+ * What bb draws for each `indicator`, so a row says which kind of busy it is
+ * rather than just "busy". Anything unlisted falls through to a plain dot:
+ * bb adds kinds over time and an older plugin has to degrade quietly rather
+ * than throw.
+ */
+const INDICATOR_ICON: Partial<Record<PluginSidebarThreadIndicator, IconName>> = {
+  "background-agent": "Bot",
+  "background-command": "Terminal",
+  workflow: "Workflow",
+  "plan-mode": "ListTodo",
+  goal: "Target",
+  "waiting-for-input": "MessageQuestion",
+  "unread-error": "AlertCircle",
+  "unread-success": "CircleCheck",
+  draft: "Edit",
+  "working-draft": "Edit",
+  runtime: "Loading",
+};
+
+/** Total live work on a thread; 0 means nothing is running. */
+function activityCount(activity: PluginSidebarThreadActivity): number {
+  return (
+    activity.workflows +
+    activity.backgroundAgents +
+    activity.backgroundCommands +
+    activity.planMode +
+    activity.goals
+  );
+}
+
+/**
+ * The leading mark on a row. Needing you outranks everything, since it is the
+ * only state that costs something to miss; below that we show bb's own
+ * indicator so the deck and the sidebar never disagree about what a thread is
+ * doing.
+ */
+/**
+ * The quick palette runs its commands outside React, so they cannot touch the
+ * display through a hook. They post here instead and the mounted list does the
+ * real work — one channel, so a command still behaves the same whether the
+ * sidebar is showing or not.
+ */
+type DisplayCommand = "groupBy" | "sortBy" | "unreadFirst";
+
+const displayCommands = {
+  listeners: new Set<(kind: DisplayCommand) => void>(),
+  emit(kind: DisplayCommand) {
+    for (const listener of displayCommands.listeners) listener(kind);
+  },
+  subscribe(listener: (kind: DisplayCommand) => void) {
+    displayCommands.listeners.add(listener);
+    // Swallow Set.delete's boolean: this is an effect destructor.
+    return () => {
+      displayCommands.listeners.delete(listener);
+    };
+  },
+};
+
+function cycleDisplay(kind: DisplayCommand) {
+  displayCommands.emit(kind);
+}
+
+/**
+ * Flatten rows into render order with a depth per row, nesting a fork or a
+ * spawned thread under its parent the way bb's own list does. A child whose
+ * parent is filtered out stays visible at the top level rather than vanishing
+ * with it — a search that hid matching threads would be the worse bug.
+ */
+function nestRows(rows: readonly Row[]): { row: Row; depth: number }[] {
+  const present = new Set(rows.map((row) => row.threadId));
+  const children = new Map<string, Row[]>();
+  const roots: Row[] = [];
+  for (const row of rows) {
+    const parent = row.parentThreadId;
+    if (parent !== null && parent !== row.threadId && present.has(parent)) {
+      const kin = children.get(parent);
+      if (kin === undefined) children.set(parent, [row]);
+      else kin.push(row);
+    } else {
+      roots.push(row);
+    }
+  }
+  const out: { row: Row; depth: number }[] = [];
+  const walk = (row: Row, depth: number) => {
+    out.push({ row, depth });
+    // Depth is capped for indent purposes by the renderer, not here: the tree
+    // is whatever bb says it is.
+    for (const child of children.get(row.threadId) ?? []) walk(child, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  return out;
+}
+
+function ThreadMark({ row }: { row: Row }) {
+  // An agent that declared what it is waiting for outranks bb's indicator:
+  // bb only knows about its own prompts, not a question asked in prose.
+  if (row.state === "needs-me") {
+    return (
+      <Icon
+        name={row.blockedOn !== null ? "MessageQuestion" : "AlertCircle"}
+        aria-label={row.indicatorLabel ?? "Needs you"}
+        className="size-3.5 shrink-0 text-destructive"
+      />
+    );
+  }
+  const icon = INDICATOR_ICON[row.indicator];
+  if (row.state === "working") {
+    const count = activityCount(row.activity);
+    return (
+      <span className="flex shrink-0 items-center gap-1">
+        <Icon
+          name={icon ?? "Loading"}
+          aria-label={row.indicatorLabel ?? "Working"}
+          className={cn(
+            "size-3.5 shrink-0 text-foreground",
+            // A spoked ring that only fades reads as stopped, which is the
+            // opposite of what this mark is for. The spinner turns; a bot or
+            // a terminal glyph would look silly rotating, so those breathe.
+            (icon ?? "Loading") === "Loading"
+              ? "animate-spin"
+              : "animate-pulse",
+          )}
+        />
+        {count > 1 ? (
+          <span className="text-[10px] tabular-nums text-muted-foreground">
+            {count}
+          </span>
+        ) : null}
+      </span>
+    );
+  }
+  // Idle threads can still carry a signal worth seeing — an error you have not
+  // read, a draft you left behind.
+  if (icon !== undefined && row.indicator !== "runtime") {
+    return (
+      <Icon
+        name={icon}
+        aria-label={row.indicatorLabel ?? undefined}
+        className={cn(
+          "size-3.5 shrink-0",
+          row.indicator === "unread-error"
+            ? "text-destructive"
+            : "text-muted-foreground",
+        )}
+      />
+    );
+  }
+  if (row.isUnread) {
+    return (
+      <span
+        aria-label="Unread"
+        className="size-2 shrink-0 rounded-full bg-foreground"
+      />
+    );
+  }
+  return <span aria-hidden className="size-2 shrink-0" />;
 }
 
 function ProjectMark({ of, className }: { of: Marked; className?: string }) {
@@ -376,11 +616,89 @@ function PullRequestBadge({ threadId }: { threadId: string }) {
   );
 }
 
+/**
+ * bb's own row actions, in our chrome. Every item routes through
+ * `useSidebarThreadActions`, so confirmations, toasts, optimistic updates and
+ * route repair behave exactly as they do in the built-in sidebar — notably
+ * Delete, which opens bb's own dialog because it counts children first.
+ *
+ * A button rather than a right-click menu: that is what bb's rows do, and the
+ * context-menu primitive is not a dependency here.
+ */
+function RowMenu({ row, canSplit }: { row: Row; canSplit: boolean }) {
+  const actions = useSidebarThreadActions();
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={`Actions for ${row.title}`}
+          onClick={(event) => event.stopPropagation()}
+          className="size-6 shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100"
+        >
+          <Icon name="MoreHorizontal" className="size-4" />
+        </Button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="end"
+          sideOffset={6}
+          onClick={(event) => event.stopPropagation()}
+          className="z-50 min-w-48 rounded-lg border border-border bg-card p-1 shadow-md"
+        >
+          <DropdownMenu.Item
+            className={MENU_ITEM}
+            onSelect={() => actions.open(row.threadId)}
+          >
+            Open
+          </DropdownMenu.Item>
+          {canSplit ? (
+            <DropdownMenu.Item
+              className={MENU_ITEM}
+              onSelect={() => actions.open(row.threadId, { split: true })}
+            >
+              Open in a split
+            </DropdownMenu.Item>
+          ) : null}
+          <DropdownMenu.Separator className="my-1 h-px bg-border" />
+          <DropdownMenu.Item
+            className={MENU_ITEM}
+            onSelect={() => void actions.setPinned(row.threadId, !row.isPinned)}
+          >
+            {row.isPinned ? "Unpin" : "Pin"}
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            className={MENU_ITEM}
+            onSelect={() => void actions.setRead(row.threadId, row.isUnread)}
+          >
+            {row.isUnread ? "Mark read" : "Mark unread"}
+          </DropdownMenu.Item>
+          <DropdownMenu.Separator className="my-1 h-px bg-border" />
+          <DropdownMenu.Item
+            className={MENU_ITEM}
+            onSelect={() => actions.archive(row.threadId)}
+          >
+            Archive
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            className={cn(MENU_ITEM, "text-destructive")}
+            onSelect={() => actions.requestDelete(row.threadId)}
+          >
+            Delete…
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
 function ThreadRow({
   row,
   selected,
   active,
   showProject,
+  depth,
   onSelect,
   onOpen,
 }: {
@@ -390,6 +708,8 @@ function ThreadRow({
   active: boolean;
   /** False under a project group, where the header already says which one. */
   showProject: boolean;
+  /** How deep under a parent thread this row sits. */
+  depth: number;
   onSelect: () => void;
   onOpen: () => void;
 }) {
@@ -397,6 +717,10 @@ function ThreadRow({
   // title in kebab-case with the thread id on the end. Those say nothing the
   // title has not; a branch someone chose does.
   const shownBranch = displayBranch(row.branchName, row.threadId);
+  // Once per rendered row, the way the built-in sidebar does it. The host owns
+  // every rule of the gesture; spreading splitProps is safe even when splits
+  // are off, because it is empty then.
+  const split = useSidebarThreadSplit(row.threadId);
   return (
     <li>
       <div
@@ -406,8 +730,12 @@ function ThreadRow({
         tabIndex={-1}
         onClick={onSelect}
         onDoubleClick={onOpen}
+        {...split.splitProps}
+        // Indent by nesting depth, capped so a long fork chain cannot push the
+        // title off the edge of a 300px column.
+        style={{ paddingLeft: `${0.75 + Math.min(depth, 4) * 0.875}rem` }}
         className={cn(
-          "cursor-pointer border-l-2 px-3 py-2.5 text-sm",
+          "group/row cursor-pointer border-l-2 pr-2 py-2.5 text-sm",
           selected
             ? active
               ? "border-foreground bg-muted"
@@ -416,24 +744,7 @@ function ThreadRow({
         )}
       >
         <div className="flex items-center gap-2.5">
-          {row.state === "needs-me" ? (
-            <span
-              aria-label="Needs you"
-              className="size-2 shrink-0 rounded-full bg-destructive"
-            />
-          ) : row.state === "working" ? (
-            <span
-              aria-label="Working"
-              className="size-2 shrink-0 animate-pulse rounded-full bg-foreground"
-            />
-          ) : row.isUnread ? (
-            <span
-              aria-label="Unread"
-              className="size-2 shrink-0 rounded-full bg-foreground"
-            />
-          ) : (
-            <span aria-hidden className="size-2 shrink-0" />
-          )}
+          <ThreadMark row={row} />
           <span
             className={cn(
               "min-w-0 flex-1 truncate",
@@ -453,6 +764,7 @@ function ThreadRow({
           <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
             {relativeTime(row.updatedAt)}
           </span>
+          <RowMenu row={row} canSplit={split.isAvailable} />
         </div>
         {showProject || shownBranch !== null || row.tags.length > 0 ? (
           <div className="mt-1.5 flex items-center gap-1.5 pl-[1.125rem] text-xs text-muted-foreground">
@@ -716,1025 +1028,6 @@ function DisplayMenu({
  * The strip above it carries what the transcript does not: the agent's standing
  * note, what it is blocked on, the branch, the PR, and the tags.
  */
-function ThreadPane({
-  row,
-  focusRequest,
-  onPullRequest,
-  onDismiss,
-}: {
-  row: Row | null;
-  focusRequest: number;
-  onPullRequest: (url: string | null) => void;
-  onDismiss: (threadId: string) => void;
-}) {
-  const pullRequest = useSidebarThreadPullRequest(row?.threadId ?? "").pullRequest;
-  const navigate = useBbNavigate();
-  useEffect(() => {
-    onPullRequest(pullRequest?.url ?? null);
-  }, [pullRequest, onPullRequest]);
-
-  if (row === null) {
-    return (
-      <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">
-        Nothing selected.
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className={cn(HEADER_CLASS, "justify-center gap-1 px-4")}>
-        <h2 className="truncate text-sm font-medium">{row.title}</h2>
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-          <ProjectMark of={row} />
-          <span>{row.projectName}</span>
-          {row.branchName === null ? null : (
-            <span className="font-mono text-[11px]">{row.branchName}</span>
-          )}
-          {pullRequest === null ? null : (
-            <button
-              type="button"
-              onClick={() => navigate.openUrl(pullRequest.url)}
-              className="font-mono text-[11px] underline-offset-2 hover:underline"
-            >
-              #{pullRequest.number} {pullRequest.state}
-            </button>
-          )}
-          {row.tags.map((tag) => (
-            <span key={tag} className="rounded bg-muted px-1 text-[10px] leading-4">
-              {tag}
-            </span>
-          ))}
-        </div>
-        {row.blockedOn !== null ? (
-          <p className="group/block mt-2 flex items-baseline gap-1.5 border-l-2 border-destructive/60 pl-2.5 text-xs leading-relaxed">
-            <span className="shrink-0 text-destructive/80">Waiting on you</span>
-            <span className="min-w-0 flex-1 text-muted-foreground">
-              {row.blockedOn}
-            </span>
-            <button
-              type="button"
-              onClick={() => onDismiss(row.threadId)}
-              className="shrink-0 text-muted-foreground underline-offset-2 opacity-0 transition-opacity hover:underline focus-visible:opacity-100 group-hover/block:opacity-100"
-            >
-              Dismiss
-            </button>
-          </p>
-        ) : row.note !== null ? (
-          <p className="mt-2 text-xs text-muted-foreground">{row.note}</p>
-        ) : null}
-      </div>
-      <div className="min-h-0 flex-1">
-        <ThreadChat
-          // Deliberately NOT keyed on the thread: remounting per selection
-          // throws the caret away, and the caret staying put while you walk
-          // threads is the entire point of the shift-arrow keys.
-          threadId={row.threadId}
-          variant="compact"
-          focusRequest={focusRequest}
-          className="h-full"
-        />
-      </div>
-    </div>
-  );
-}
-
-function DeckPage({ subPath }: PluginNavPanelProps) {
-  const { threads, projects: hostProjects } = useSidebarThreads();
-  const actions = useSidebarThreadActions();
-  const { rpc, meta, views, projects, display, bindings, changeDisplay, setViews } =
-    useDeck();
-  const [text, setText] = useState(() =>
-    subPath === "" ? "" : decodeSubPath(subPath),
-  );
-  // The cursor walks headers AND rows, the way a tree does: a folded group has
-  // no rows to land on, so its header has to be a stop or you can never reopen
-  // it from the keyboard.
-  const [cursor, setCursor] = useState<
-    { kind: "group"; key: string } | { kind: "row"; threadId: string } | null
-  >(null);
-  const [deepHits, setDeepHits] = useState<Hit[]>([]);
-  const [sheetOpen, setSheetOpen] = useState(false);
-  // Which side holds the caret. Without a cue you cannot tell whether the next
-  // arrow key moves the list or edits a message.
-  const [focusSide, setFocusSide] = useState<"list" | "chat">("list");
-  // Collapsed group keys, per grouping mode: the groups you fold under "by
-  // project" are not the ones you fold under "by day".
-  const [collapsed, setCollapsed] = useState<Record<string, string[]>>(() => {
-    try {
-      const raw = globalThis.localStorage?.getItem(COLLAPSED_KEY);
-      return raw == null ? {} : (JSON.parse(raw) as Record<string, string[]>);
-    } catch {
-      return {};
-    }
-  });
-  /** Threads archived from here, newest last. `u` pops one back. */
-  const archived = useRef<string[]>([]);
-  /** The group the fold key last shut, so the unfold key can reopen it. */
-  const lastFolded = useRef<string | null>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
-  const listRef = useRef<HTMLUListElement>(null);
-  // Bumping this is how the host is asked to put the caret in the composer.
-  const [focusRequest, setFocusRequest] = useState(0);
-  const splitRef = useRef<HTMLDivElement>(null);
-  /** Filled by the pane, which is where the PR lookup already lives. */
-  const pullRequestUrl = useRef<string | null>(null);
-  const { width, dragging, startDrag, clamp, commit } = useListWidth(splitRef);
-  const navigate = useBbNavigate();
-
-  const query = useMemo(() => parseQuery(text), [text]);
-
-  const projectById = useMemo(
-    () => new Map(projects.map((project) => [project.id, project] as const)),
-    [projects],
-  );
-  const metaById = useMemo(
-    () => new Map(meta.map((entry) => [entry.threadId, entry] as const)),
-    [meta],
-  );
-
-  const rows = useRows(threads, hostProjects, projects, meta);
-
-  const matching = useMemo(
-    () => rows.filter((row) => matches(row, query)),
-    [rows, query],
-  );
-  const groups = useMemo(
-    () => groupRows(matching, display),
-    [matching, display],
-  );
-
-  const folded = useMemo(
-    () => new Set(collapsed[display.groupBy] ?? []),
-    [collapsed, display.groupBy],
-  );
-  const toggleGroup = useCallback(
-    (key: string, force?: boolean) => {
-      setCollapsed((current) => {
-        const mode = display.groupBy;
-        const set = new Set(current[mode] ?? []);
-        const shut = force ?? !set.has(key);
-        if (shut) set.add(key);
-        else set.delete(key);
-        const next = { ...current, [mode]: [...set] };
-        try {
-          globalThis.localStorage?.setItem(COLLAPSED_KEY, JSON.stringify(next));
-        } catch {
-          // Folding still works for this session without storage.
-        }
-        return next;
-      });
-    },
-    [display.groupBy],
-  );
-
-  // The flat order the keyboard walks, which has to be the order on screen:
-  // a folded group's rows are not reachable with the arrow keys either.
-  const visible = useMemo(
-    () =>
-      groups.flatMap((group) => (folded.has(group.key) ? [] : group.rows)),
-    [groups, folded],
-  );
-
-  // Deep search runs only when the local list comes up short, so the common
-  // case stays instant and the archive is still reachable.
-  const thin = query.text.length >= 2 && visible.length < 5;
-  useEffect(() => {
-    if (!thin) {
-      setDeepHits([]);
-      return;
-    }
-    const timer = setTimeout(() => {
-      rpc.call("search_deep", { text: query.text }).then(
-        (next) => setDeepHits(next.hits),
-        () => setDeepHits([]),
-      );
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [rpc, thin, query.text]);
-
-  const known = useMemo(
-    () => new Set(visible.map((row) => row.threadId)),
-    [visible],
-  );
-  const extraHits = useMemo(
-    () => deepHits.filter((hit) => !known.has(hit.threadId)),
-    [deepHits, known],
-  );
-
-  /** Headers and their visible rows, in screen order: what the arrows walk. */
-  const navigable = useMemo(
-    () =>
-      groups.flatMap((group) => [
-        { kind: "group" as const, key: group.key },
-        ...(folded.has(group.key)
-          ? []
-          : group.rows.map((row) => ({ kind: "row" as const, row }))),
-      ]),
-    [groups, folded],
-  );
-
-  const cursorAt = useMemo(() => {
-    const index = navigable.findIndex((item) =>
-      cursor === null
-        ? false
-        : item.kind === "group"
-          ? cursor.kind === "group" && item.key === cursor.key
-          : cursor.kind === "row" && item.row.threadId === cursor.threadId,
-    );
-    return index === -1 ? 0 : index;
-  }, [navigable, cursor]);
-
-  /**
-   * The thread the pane shows. It holds the last row the cursor was on, so
-   * stepping onto a group header does not blank the conversation beside it.
-   */
-  const [shownId, setShownId] = useState<string | null>(null);
-  const here = navigable[cursorAt];
-  useEffect(() => {
-    if (here?.kind === "row") setShownId(here.row.threadId);
-  }, [here]);
-  const selected = useMemo(
-    () =>
-      visible.find((row) => row.threadId === shownId) ??
-      (here?.kind === "row" ? here.row : null) ??
-      visible[0] ??
-      null,
-    [visible, shownId, here],
-  );
-  const cursorRow = here?.kind === "row" ? here.row : null;
-  const cursorGroup =
-    here?.kind === "group"
-      ? here.key
-      : here?.kind === "row"
-        ? groups.find((group) =>
-            group.rows.some((row) => row.threadId === here.row.threadId),
-          )?.key ?? null
-        : null;
-
-  // Keep the URL in step so back/forward walks searches.
-  const lastPushed = useRef(text);
-  useEffect(() => {
-    if (lastPushed.current === text) return;
-    const timer = setTimeout(() => {
-      lastPushed.current = text;
-      navigate.toPluginPanel("deck", {
-        // bb encodes the segment; encoding here too is what double-encoded it.
-        subPath: text,
-        replace: true,
-      });
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [text, navigate]);
-
-  const move = useCallback(
-    (step: number) => {
-      if (navigable.length === 0) return;
-      const next = Math.min(
-        Math.max(cursorAt + step, 0),
-        navigable.length - 1,
-      );
-      const item = navigable[next]!;
-      setCursor(
-        item.kind === "group"
-          ? { kind: "group", key: item.key }
-          : { kind: "row", threadId: item.row.threadId },
-      );
-      const id = item.kind === "group" ? `group-${item.key}` : `row-${item.row.threadId}`;
-      document.getElementById(id)?.scrollIntoView({ block: "nearest" });
-    },
-    [navigable, cursorAt],
-  );
-
-  const saveView = useCallback(() => {
-    const name = window.prompt("Name this view", "")?.trim();
-    if (name === undefined || name === "") return;
-    rpc.call("view_save", { name, query: text, display }).then(
-      (next) => {
-        setViews(next.views);
-        toast.success(`Saved "${name}"`);
-      },
-      (cause: unknown) => {
-        toast.error(cause instanceof Error ? cause.message : String(cause));
-      },
-    );
-  }, [rpc, text, display, setViews]);
-
-  const resizeList = useCallback(
-    (delta: number | null) => {
-      commit(clamp(delta === null ? LIST_WIDTH_DEFAULT : width + delta));
-    },
-    [clamp, commit, width],
-  );
-
-  const openPullRequest = useCallback(() => {
-    if (pullRequestUrl.current === null) {
-      toast("No pull request on this thread.");
-      return;
-    }
-    navigate.openUrl(pullRequestUrl.current);
-  }, [navigate]);
-
-  const focusList = useCallback(() => {
-    composerWanted.current = false;
-    listRef.current?.focus();
-  }, []);
-  // The panel opens with the list focused, so the first arrow key works
-  // without touching the mouse.
-  useEffect(focusList, [focusList]);
-  /**
-   * False unless you asked for the composer with Tab. The host's chat takes
-   * focus for itself when its thread changes, which reads as the arrow keys
-   * dying mid-navigation, so after every selection change we take it back
-   * unless you actually asked to write.
-   */
-  const composerWanted = useRef(false);
-  const focusComposer = useCallback(() => {
-    composerWanted.current = true;
-    setFocusRequest((at) => at + 1);
-  }, []);
-  const shownThreadId = selected?.threadId ?? null;
-  useEffect(() => {
-    if (composerWanted.current || shownThreadId === null) return;
-    const timer = setTimeout(() => {
-      // Only take focus back from the chat, which grabs it whenever its thread
-      // changes. Typing anywhere else also changes the selection, and yanking
-      // the caret out of a field mid-word is how "[ofl then Enter" ended up
-      // doing nothing at all.
-      if (composerWanted.current) return;
-      if (isTypingTarget(document.activeElement)) return;
-      listRef.current?.focus();
-    }, 120);
-    return () => clearTimeout(timer);
-  }, [shownThreadId]);
-
-
-  useEffect(() => {
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      const chord = encodeChord(event);
-      const globalAction = lookup(bindings, chord, "global");
-
-      // Chords that type nothing work everywhere, including mid sentence.
-      if (globalAction === "group-cycle") {
-        event.preventDefault();
-        const groupBy = cycleGroupBy(display.groupBy);
-        changeDisplay({ ...display, groupBy });
-        toast.success(GROUP_BY_LABEL[groupBy]);
-        return;
-      }
-      if (globalAction === "sort-cycle") {
-        event.preventDefault();
-        const sortBy = cycleSortBy(display.sortBy);
-        changeDisplay({ ...display, sortBy });
-        toast.success(SORT_BY_LABEL[sortBy]);
-        return;
-      }
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      // Any key dismisses the cheatsheet, which is the only thing it should do
-      // while it is up.
-      if (sheetOpen) {
-        event.preventDefault();
-        setSheetOpen(false);
-        return;
-      }
-
-      // Shift+arrows walk threads from ANYWHERE in the panel, including mid
-      // sentence in the composer. That is the whole point: changing which
-      // thread you are answering should not cost you the caret.
-      const typing = isTypingTarget(event.target);
-      const inSearch = event.target === searchRef.current;
-
-      // A global move chord reaches the list from inside the composer, and
-      // lands you back in the list rather than holding the caret: once you are
-      // navigating, navigation is what the arrows should do.
-      if (globalAction === "move-down" || globalAction === "move-up") {
-        event.preventDefault();
-        move(globalAction === "move-down" ? 1 : -1);
-        if (typing) focusList();
-        return;
-      }
-
-      if (typing) {
-        // Tab from the search box continues into the composer rather than
-        // walking the browser's focus order through every control.
-        if (inSearch && lookup(bindings, chord, "list") === "write") {
-          event.preventDefault();
-          focusComposer();
-          return;
-        }
-        // Escape anywhere you are typing comes back to the list, which is the
-        // one key that always gets you home.
-        if (globalAction === "list" && !inSearch) {
-          event.preventDefault();
-          focusList();
-          return;
-        }
-        if (inSearch && !event.defaultPrevented) {
-          const inField = lookup(bindings, chord, "list");
-          if (inField === "move-down" || inField === "move-up") {
-            event.preventDefault();
-            move(inField === "move-down" ? 1 : -1);
-          }
-        }
-        return;
-      }
-
-      const action = lookup(bindings, chord);
-      // Escape returns to the list from anywhere that is not the search box,
-      // including the chat's own buttons, which are not text fields.
-      if (action === "list" && document.activeElement !== listRef.current) {
-        event.preventDefault();
-        focusList();
-        return;
-      }
-      if (action === "write") {
-        event.preventDefault();
-        focusComposer();
-        return;
-      }
-      if (action === "search") {
-        event.preventDefault();
-        searchRef.current?.focus();
-        searchRef.current?.select();
-        return;
-      }
-      if (action === "group-cycle" || action === "sort-cycle") {
-        event.preventDefault();
-        const next =
-          action === "group-cycle"
-            ? { ...display, groupBy: cycleGroupBy(display.groupBy) }
-            : { ...display, sortBy: cycleSortBy(display.sortBy) };
-        changeDisplay(next);
-        toast.success(
-          action === "group-cycle"
-            ? GROUP_BY_LABEL[next.groupBy]
-            : SORT_BY_LABEL[next.sortBy],
-        );
-        return;
-      }
-      if (action === "move-down") {
-        event.preventDefault();
-        move(1);
-        return;
-      }
-      if (action === "move-up") {
-        event.preventDefault();
-        move(-1);
-        return;
-      }
-      // Deck-wide keys come before the selection guard: with nothing matching
-      // there is no selected row, and that is exactly when you need Escape and
-      // the view keys to get you out again.
-      if (action === "list") {
-        if (text !== "") {
-          event.preventDefault();
-          setText("");
-        }
-        return;
-      }
-      if (/^[1-9]$/.test(event.key) && !event.metaKey) {
-        const view = views[Number(event.key) - 1];
-        if (view !== undefined) {
-          event.preventDefault();
-          setText(view.query);
-          changeDisplay(view.display);
-        }
-        return;
-      }
-
-      if (action === "help") {
-        event.preventDefault();
-        setSheetOpen(true);
-        return;
-      }
-      if (action === "fold" || action === "unfold" || action === "fold-toggle") {
-        if (cursorGroup === null) return;
-        event.preventDefault();
-        if (action === "fold-toggle") {
-          toggleGroup(cursorGroup);
-          setCursor({ kind: "group", key: cursorGroup });
-          return;
-        }
-        if (action === "unfold") {
-          // On a folded header this opens it. Anywhere else there is nothing
-          // to the right, which is what a tree does too.
-          if (folded.has(cursorGroup)) toggleGroup(cursorGroup, false);
-          return;
-        }
-        // Left on a row climbs to its header, the way a tree does; left again
-        // folds it. Two presses, each one obvious.
-        if (cursorRow !== null) {
-          setCursor({ kind: "group", key: cursorGroup });
-          return;
-        }
-        toggleGroup(cursorGroup, true);
-        return;
-      }
-      if (action === "unread-first") {
-        event.preventDefault();
-        const unreadFirst = !display.unreadFirst;
-        changeDisplay({ ...display, unreadFirst });
-        toast.success(unreadFirst ? "Unread first" : "Unread in order");
-        return;
-      }
-      if (
-        action === "width-narrow" ||
-        action === "width-wide" ||
-        action === "width-reset"
-      ) {
-        event.preventDefault();
-        resizeList(
-          action === "width-narrow" ? -48 : action === "width-wide" ? 48 : null,
-        );
-        return;
-      }
-      if (action === "undo") {
-        event.preventDefault();
-        const last = archived.current.pop();
-        if (last === undefined) {
-          toast("Nothing to undo.");
-          return;
-        }
-        rpc.call("thread_unarchive", { threadId: last }).then(
-          () => toast.success("Restored"),
-          () => toast.error("Could not restore that thread."),
-        );
-        return;
-      }
-      if (action === "view-save") {
-        event.preventDefault();
-        saveView();
-        return;
-      }
-      if (action === "view-delete") {
-        event.preventDefault();
-        const applied = views.find((view) => view.query === text);
-        if (applied === undefined) {
-          toast("You are not in a saved view.");
-          return;
-        }
-        rpc.call("view_delete", { id: applied.id }).then(
-          (next) => {
-            setViews(next.views);
-            toast.success(`Deleted "${applied.name}"`);
-          },
-          () => toast.error("Could not delete that view."),
-        );
-        return;
-      }
-
-      // Row actions need a row under the cursor, not merely something shown in
-      // the pane: pressing archive on a group header should do nothing.
-      if (cursorRow === null) return;
-      const selected = cursorRow;
-      if (action === "open") {
-        event.preventDefault();
-        actions.open(selected.threadId);
-      } else if (action === "open-split") {
-        event.preventDefault();
-        actions.open(selected.threadId, { split: true });
-      } else if (action === "archive") {
-        event.preventDefault();
-        // The host archives and raises its own undo toast; `u` is the keyboard
-        // path to the same thing, which is why the id goes on a stack here.
-        archived.current.push(selected.threadId);
-        actions.archive(selected.threadId);
-      } else if (action === "pin") {
-        event.preventDefault();
-        void actions.setPinned(selected.threadId, !selected.isPinned);
-      } else if (action === "read") {
-        event.preventDefault();
-        const read = selected.isUnread;
-        rpc
-          .call("thread_read", { threadId: selected.threadId, read })
-          .then(
-            () => toast.success(read ? "Marked read" : "Marked unread"),
-            () => toast.error("Could not change that."),
-          );
-      } else if (action === "pull-request") {
-        event.preventDefault();
-        openPullRequest();
-      } else if (action === "block-clear") {
-        event.preventDefault();
-        if (selected.blockedOn === null) {
-          toast("Nothing is waiting on you there.");
-          return;
-        }
-        rpc.call("block_clear", { threadId: selected.threadId }).then(
-          () => toast.success("Dismissed"),
-          () => toast.error("Could not dismiss that."),
-        );
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [
-    move,
-    selected,
-    actions,
-    views,
-    text,
-    display,
-    changeDisplay,
-    focusList,
-    focusComposer,
-    rpc,
-    setViews,
-    saveView,
-    sheetOpen,
-    resizeList,
-    openPullRequest,
-    groups,
-    folded,
-    toggleGroup,
-    cursorRow,
-    cursorGroup,
-    bindings,
-  ]);
-
-  // A project group names its project once, in the header, so the rows under it
-  // stop repeating it.
-  const byProject = display.groupBy === "project";
-
-  const counts = useMemo(() => {
-    const tally: Record<State, number> = {
-      "needs-me": 0,
-      working: 0,
-      idle: 0,
-      done: 0,
-    };
-    for (const row of visible) tally[row.state] += 1;
-    return tally;
-  }, [visible]);
-
-  return (
-    <div
-      ref={splitRef}
-      onFocusCapture={(event) => {
-        setFocusSide(
-          listRef.current?.contains(event.target as Node) ? "list" : "chat",
-        );
-      }}
-      className={cn(
-        "relative flex h-full min-h-0 flex-1",
-        // Killing selection while dragging stops the pointer from painting the
-        // list blue as it crosses rows.
-        dragging && "select-none",
-      )}
-    >
-      <div
-        style={{ width }}
-        className={cn(
-          "flex min-h-0 shrink-0 flex-col transition-colors",
-          // The side without the caret recedes a hair. Subtle on purpose: it
-          // has to be readable at a glance, not a spotlight.
-          focusSide === "list" ? "bg-background" : "bg-muted/20",
-        )}
-      >
-        <div className={cn(HEADER_CLASS, "px-3")}>
-          <div className="flex items-center gap-1">
-            <div className="min-w-0 flex-1">
-              <SearchBar
-                value={text}
-                onChange={setText}
-                projectNames={projects.map((project) => project.name)}
-                inputRef={searchRef}
-                onSubmit={focusList}
-              />
-            </div>
-            <DisplayMenu display={display} onChange={changeDisplay} />
-          </div>
-          <div className="flex flex-wrap items-center gap-1">
-            {views.map((view, index) => (
-              <button
-                key={view.id}
-                type="button"
-                onClick={() => {
-                  setText(view.query);
-                  changeDisplay(view.display);
-                }}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  rpc
-                    .call("view_delete", { id: view.id })
-                    .then((next) => setViews(next.views), () => undefined);
-                }}
-                title={`${view.query}  (right-click to delete)`}
-                className={cn(
-                  "rounded px-1.5 py-0.5 text-xs",
-                  view.query === text
-                    ? "bg-foreground text-background"
-                    : "bg-muted text-muted-foreground hover:text-foreground",
-                )}
-              >
-                <span className="mr-1 font-mono text-[10px] opacity-60">
-                  {index + 1}
-                </span>
-                {view.name}
-              </button>
-            ))}
-            {text.trim() === "" ? null : (
-              <button
-                type="button"
-                onClick={saveView}
-                className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
-              >
-                + save view
-              </button>
-            )}
-            <span className="ml-auto text-xs text-muted-foreground">
-              {counts["needs-me"] > 0 ? (
-                <span className="text-destructive">
-                  {counts["needs-me"]} need you
-                </span>
-              ) : (
-                `${visible.length} shown`
-              )}
-            </span>
-          </div>
-        </div>
-
-        <ul
-          ref={listRef}
-          role="listbox"
-          tabIndex={0}
-          aria-label="Threads"
-          aria-activedescendant={
-            here === undefined
-              ? undefined
-              : here.kind === "group"
-                ? `group-${here.key}`
-                : `row-${here.row.threadId}`
-          }
-          className="min-h-0 flex-1 overflow-y-auto outline-none"
-        >
-          {groups.map((group) => (
-            <div key={group.key}>
-              <li
-                role="button"
-                tabIndex={-1}
-                id={`group-${group.key}`}
-                onClick={() => {
-                  toggleGroup(group.key);
-                  setCursor({ kind: "group", key: group.key });
-                }}
-                className={cn(
-                  "sticky top-0 z-10 mt-1 flex cursor-pointer select-none items-center gap-1.5 border-l-2 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide backdrop-blur hover:text-foreground",
-                  here?.kind === "group" && here.key === group.key
-                    ? focusSide === "list"
-                      ? "border-foreground bg-muted text-foreground"
-                      : "border-transparent bg-muted/50 text-foreground"
-                    : "border-transparent bg-card/95 text-muted-foreground",
-                )}
-              >
-                <Icon
-                  name={folded.has(group.key) ? "ChevronRight" : "ChevronDown"}
-                  className="size-3 shrink-0"
-                  aria-hidden
-                />
-                {/* Only real project buckets carry a mark. "Pinned" is a
-                    group under every grouping, and stamping it with whichever
-                    project happened to sort first would be a lie. */}
-                {group.key.startsWith("p:") && group.rows[0] !== undefined ? (
-                  <ProjectMark of={group.rows[0]} className="size-3.5" />
-                ) : null}
-                <span>{group.label}</span>
-                <span className="tabular-nums opacity-60">
-                  {group.rows.length}
-                </span>
-              </li>
-              {(folded.has(group.key) ? [] : group.rows).map((row) => (
-                <div key={row.threadId} data-thread={row.threadId}>
-                  <ThreadRow
-                    row={row}
-                    selected={cursorRow?.threadId === row.threadId}
-                    active={focusSide === "list"}
-                    showProject={!byProject}
-                    onSelect={() => setCursor({ kind: "row", threadId: row.threadId })}
-                    onOpen={() => actions.open(row.threadId)}
-                  />
-                </div>
-              ))}
-            </div>
-          ))}
-          {visible.length === 0 ? (
-            <li className="px-3 py-8 text-center text-sm text-muted-foreground">
-              Nothing matches.
-            </li>
-          ) : null}
-          {extraHits.length === 0 ? null : (
-            <>
-              <li className="sticky top-0 z-10 bg-card/95 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground backdrop-blur">
-                Also in the archive
-              </li>
-              {extraHits.map((hit) => (
-                <li key={hit.threadId}>
-                  <button
-                    type="button"
-                    onClick={() => actions.open(hit.threadId)}
-                    className="w-full px-3 py-2 text-left hover:bg-muted/50"
-                  >
-                    <span className="block truncate text-sm text-muted-foreground">
-                      {hit.title}
-                    </span>
-                    {hit.snippet === "" ? null : (
-                      <span className="mt-0.5 block truncate text-xs text-muted-foreground/70">
-                        {hit.snippet}
-                      </span>
-                    )}
-                  </button>
-                </li>
-              ))}
-            </>
-          )}
-        </ul>
-
-        <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-          {(
-            [
-              ["move-down", "move"],
-              ["write", "write"],
-              ["list", "list"],
-              ["search", "find"],
-              ["open", "open"],
-              ["archive", "done"],
-              ["undo", "undo"],
-              ["help", "all keys"],
-            ] as [ActionId, string][]
-          ).map(([id, label], index) => {
-            const chord = bindings[id][0];
-            if (chord === undefined) return null;
-            return (
-              <span key={id}>
-                {index === 0 ? "" : " · "}
-                <kbd className="font-mono">{formatChord(chord)}</kbd> {label}
-              </span>
-            );
-          })}
-        </div>
-      </div>
-
-      <PaneHandle
-        width={width}
-        dragging={dragging}
-        onStartDrag={startDrag}
-        onNudge={(delta) => commit(clamp(width + delta))}
-        onReset={() => commit(clamp(LIST_WIDTH_DEFAULT))}
-      />
-
-      {sheetOpen ? (
-        <ShortcutSheet bindings={bindings} onClose={() => setSheetOpen(false)} />
-      ) : null}
-
-      <div
-        className={cn(
-          "min-h-0 flex-1 transition-colors",
-          focusSide === "chat" ? "bg-background" : "bg-muted/20",
-        )}
-      >
-        <ThreadPane
-          row={selected}
-          focusRequest={focusRequest}
-          onPullRequest={(url) => {
-            pullRequestUrl.current = url;
-          }}
-          onDismiss={(threadId) => {
-            rpc.call("block_clear", { threadId }).then(
-              () => toast.success("Dismissed"),
-              () => toast.error("Could not dismiss that."),
-            );
-          }}
-        />
-      </div>
-    </div>
-  );
-}
-
-const LIST_WIDTH_KEY = "bb-plugin-deck:list-width";
-const LIST_WIDTH_DEFAULT = 416;
-const LIST_WIDTH_MIN = 280;
-/** Leave at least this much for the context pane, whatever the window size. */
-const CONTEXT_WIDTH_MIN = 360;
-
-/**
- * The list pane's width, remembered per device. localStorage rather than plugin
- * storage on purpose: the right split depends on the screen you are sitting at,
- * not on the account, and a laptop should not inherit a monitor's layout.
- */
-function useListWidth(containerRef: RefObject<HTMLDivElement | null>) {
-  const [width, setWidth] = useState(() => {
-    const saved = Number(globalThis.localStorage?.getItem(LIST_WIDTH_KEY));
-    return Number.isFinite(saved) && saved >= LIST_WIDTH_MIN
-      ? saved
-      : LIST_WIDTH_DEFAULT;
-  });
-  const [dragging, setDragging] = useState(false);
-
-  const clamp = useCallback(
-    (next: number) => {
-      const total = containerRef.current?.clientWidth ?? Infinity;
-      return Math.round(
-        Math.min(Math.max(next, LIST_WIDTH_MIN), Math.max(LIST_WIDTH_MIN, total - CONTEXT_WIDTH_MIN)),
-      );
-    },
-    [containerRef],
-  );
-
-  const commit = useCallback((next: number) => {
-    setWidth(next);
-    try {
-      globalThis.localStorage?.setItem(LIST_WIDTH_KEY, String(next));
-    } catch {
-      // A browser with storage disabled still gets a working, unsaved split.
-    }
-  }, []);
-
-  // The window can shrink below the split we remembered, so re-clamp on resize
-  // rather than letting the context pane get squeezed to nothing.
-  useEffect(() => {
-    const onResize = () => setWidth((current) => clamp(current));
-    globalThis.addEventListener("resize", onResize);
-    return () => globalThis.removeEventListener("resize", onResize);
-  }, [clamp]);
-
-  /**
-   * Drag from a pointerdown on the handle. The move and up listeners go on the
-   * window, not the handle: the handle is one pixel wide, and a fast drag
-   * leaves it behind long before the pointer stops.
-   */
-  const startDrag = useCallback(() => {
-    setDragging(true);
-    const onMove = (event: PointerEvent) => {
-      const left = containerRef.current?.getBoundingClientRect().left ?? 0;
-      setWidth(clamp(event.clientX - left));
-    };
-    const onUp = (event: PointerEvent) => {
-      const left = containerRef.current?.getBoundingClientRect().left ?? 0;
-      commit(clamp(event.clientX - left));
-      setDragging(false);
-      globalThis.removeEventListener("pointermove", onMove);
-      globalThis.removeEventListener("pointerup", onUp);
-      globalThis.removeEventListener("pointercancel", onUp);
-    };
-    globalThis.addEventListener("pointermove", onMove);
-    globalThis.addEventListener("pointerup", onUp);
-    globalThis.addEventListener("pointercancel", onUp);
-  }, [clamp, commit, containerRef]);
-
-  return { width, dragging, startDrag, clamp, commit };
-}
-
-function PaneHandle({
-  width,
-  dragging,
-  onStartDrag,
-  onNudge,
-  onReset,
-}: {
-  width: number;
-  dragging: boolean;
-  onStartDrag: () => void;
-  onNudge: (delta: number) => void;
-  onReset: () => void;
-}) {
-  return (
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize the list"
-      aria-valuenow={width}
-      aria-valuemin={LIST_WIDTH_MIN}
-      tabIndex={0}
-      onPointerDown={(event) => {
-        event.preventDefault();
-        onStartDrag();
-      }}
-      onDoubleClick={onReset}
-      onKeyDown={(event) => {
-        // A separator you can only drag is one a keyboard user cannot move.
-        if (event.key === "ArrowLeft") {
-          event.preventDefault();
-          onNudge(event.shiftKey ? -64 : -16);
-        } else if (event.key === "ArrowRight") {
-          event.preventDefault();
-          onNudge(event.shiftKey ? 64 : 16);
-        } else if (event.key === "Home") {
-          event.preventDefault();
-          onReset();
-        }
-      }}
-      className={cn(
-        "group relative w-px shrink-0 cursor-col-resize bg-border outline-none",
-        "before:absolute before:inset-y-0 before:-left-1 before:-right-1 before:content-['']",
-        dragging
-          ? "bg-foreground/40"
-          : "hover:bg-foreground/30 focus-visible:bg-foreground/40",
-      )}
-      title="Drag to resize, double-click to reset"
-    />
-  );
-}
-
 /**
  * The plugin's own settings page, under bb's declarative form. The declarative
  * field is a single line-per-project text blob: fine as storage, useless as a
@@ -1990,8 +1283,6 @@ function SettingsSection() {
     );
   };
 
-  const groups = ["Moving", "Acting", "Organising", "Layout"] as const;
-
   return (
     <div className="space-y-4">
       <Card
@@ -2072,27 +1363,16 @@ function SettingsSection() {
 
       <Card
         title="Keyboard"
-        hint="These are defaults, not rules. Add a key to any action, click a key to remove it, and reset one at a time. A key with no modifier only works while the list has focus, because anywhere else it would type a character."
+        hint="bb owns the keyboard in its own sidebar, so Deck binds only these three, and only with a modifier — a bare letter would fire while you were typing. All three are also in bb's quick palette under Deck."
       >
-        <div className="space-y-4">
-          {groups.map((group) => (
-            <div key={group}>
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {group}
-              </p>
-              <div className="mt-1 divide-y divide-border">
-                {ACTIONS.filter((action) => action.group === group).map(
-                  (action) => (
-                    <BindingRow
-                      key={action.id}
-                      action={action}
-                      chords={bindings[action.id]}
-                      onChange={(chords) => setChords(action.id, chords)}
-                    />
-                  ),
-                )}
-              </div>
-            </div>
+        <div className="mt-1 divide-y divide-border">
+          {ACTIONS.map((action) => (
+            <BindingRow
+              key={action.id}
+              action={action}
+              chords={bindings[action.id]}
+              onChange={(chords) => setChords(action.id, chords)}
+            />
           ))}
         </div>
       </Card>
@@ -2100,52 +1380,292 @@ function SettingsSection() {
   );
 }
 
-function ShortcutSheet({
-  bindings,
-  onClose,
-}: {
-  bindings: Bindings;
-  onClose: () => void;
-}) {
+
+/**
+ * Deck's rows in bb's sidebar.
+ *
+ * Deliberately not the page in miniature. The last attempt put the filter bar,
+ * the organize menu and saved views into a 300px column and made both surfaces
+ * worse: the sidebar is a browser, the page is a workspace. So this is the row
+ * treatment and the grouping, and nothing else — search and views stay on the
+ * page, one keystroke away.
+ *
+ * bb owns the on/off switch for this (Settings → Appearance), so there is no
+ * setting here to disagree with it.
+ */
+function SidebarList({ activeThreadId, onNavigate }: PluginThreadListProps) {
+  const { threads, projects: hostProjects } = useSidebarThreads();
+  const {
+    rpc,
+    meta,
+    views,
+    projects,
+    display,
+    session,
+    bindings,
+    changeDisplay,
+    changeSession,
+    setViews,
+  } = useDeck();
+  const actions = useSidebarThreadActions();
+  const rows = useRows(threads, hostProjects, projects, meta);
+  // The same grammar the page used, so [project], is:, #1284 and a branch name
+  // all work out here too. A lookalike box that only matched titles would be a
+  // worse lie than no box at all.
+  //
+  // The text lives in the persisted session rather than in local state: this
+  // list is mounted and unmounted by bb as you move around, and a filter that
+  // emptied itself every time you came back would make a saved view the only
+  // way to hold a search.
+  const text = session.query;
+  const setText = useCallback(
+    (next: string) => changeSession({ ...session, query: next }),
+    [changeSession, session],
+  );
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const query = useMemo(() => parseQuery(text), [text]);
+  const matching = useMemo(
+    () => rows.filter((row) => matches(row, query)),
+    [rows, query],
+  );
+  const groups = useMemo(
+    () => groupRows(matching, display),
+    [matching, display],
+  );
+  const projectNames = useMemo(
+    () => projects.map((project) => project.name),
+    [projects],
+  );
+  const folded = useMemo(
+    () => new Set(session.folded),
+    [session.folded],
+  );
+  const toggleFold = useCallback(
+    (key: string) => {
+      const next = new Set(session.folded);
+      if (!next.delete(key)) next.add(key);
+      changeSession({ ...session, folded: [...next] });
+    },
+    [changeSession, session],
+  );
+  const byProject = display.groupBy === "project";
+
+  const runDisplayCommand = useCallback(
+    (kind: DisplayCommand) => {
+      if (kind === "groupBy") {
+        changeDisplay({ ...display, groupBy: cycleGroupBy(display.groupBy) });
+      } else if (kind === "sortBy") {
+        changeDisplay({ ...display, sortBy: cycleSortBy(display.sortBy) });
+      } else {
+        changeDisplay({ ...display, unreadFirst: !display.unreadFirst });
+      }
+    },
+    [changeDisplay, display],
+  );
+
+  // Commands from bb's quick palette land here, where there is a hook to use.
+  useEffect(
+    () => displayCommands.subscribe(runDisplayCommand),
+    [runDisplayCommand],
+  );
+
+  // ...and the same three as keys. Only modified chords: Deck no longer owns a
+  // surface that holds the caret, so a bare letter would fire while you type in
+  // bb's composer.
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      const action = lookup(bindings, encodeChord(event), "global");
+      if (action === null) return;
+      event.preventDefault();
+      runDisplayCommand(
+        action === "group-cycle"
+          ? "groupBy"
+          : action === "sort-cycle"
+            ? "sortBy"
+            : "unreadFirst",
+      );
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [bindings, runDisplayCommand]);
+
+  // Deep search runs only when the live list comes up short, so the common case
+  // stays instant and finished work is still reachable — most of the board is
+  // done, and the sidebar's own threads cannot see any of it.
+  const [deepHits, setDeepHits] = useState<Hit[]>([]);
+  const thin = query.text.length >= 2 && matching.length < 5;
+  useEffect(() => {
+    if (!thin) {
+      setDeepHits([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      rpc.call("search_deep", { text: query.text }).then(
+        (next) => setDeepHits(next.hits),
+        () => setDeepHits([]),
+      );
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [rpc, thin, query.text]);
+  const known = useMemo(
+    () => new Set(matching.map((row) => row.threadId)),
+    [matching],
+  );
+  const extraHits = useMemo(
+    () => deepHits.filter((hit) => !known.has(hit.threadId)),
+    [deepHits, known],
+  );
+
+  const saveView = () => {
+    const name = window.prompt("Name this view", "")?.trim();
+    if (name === undefined || name === "") return;
+    rpc.call("view_save", { name, query: text, display }).then(
+      (next) => {
+        setViews(next.views);
+        toast.success(`Saved "${name}"`);
+      },
+      (cause: unknown) => {
+        toast.error(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+  };
+
+  const open = (threadId: string) => {
+    actions.open(threadId);
+    onNavigate();
+  };
+
   return (
-    <div
-      role="dialog"
-      aria-label="Keyboard shortcuts"
-      onClick={onClose}
-      className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 p-6 backdrop-blur-sm"
-    >
-      <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-lg">
-        <p className="text-sm font-medium">Keyboard</p>
-        <dl className="mt-3 space-y-1">
-          {ACTIONS.map((action) => (
-            <div key={action.id} className="flex items-baseline gap-3 text-sm">
-              <dt className="flex w-32 shrink-0 flex-wrap justify-end gap-1">
-                {bindings[action.id].length === 0 ? (
-                  <span className="text-xs text-muted-foreground">unbound</span>
-                ) : (
-                  bindings[action.id].map((chord) => (
-                    <Chord key={chord} chord={chord} />
-                  ))
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* Paint bb's own sidebar surface, not --background: that one is the main
+          area's colour, so naming it gave an opaque band in the wrong shade.
+          There is no bg-sidebar utility in this build — Tailwind only emits
+          utilities for tokens it knows, and --sidebar is bb's — so take the
+          variable directly. */}
+      <div className="sticky top-0 z-20 flex shrink-0 flex-col gap-1 bg-[var(--sidebar,var(--background))] px-2 pb-1 pt-1">
+        <SearchBar
+          value={text}
+          onChange={setText}
+          projectNames={projectNames}
+          inputRef={inputRef}
+          onSubmit={() => inputRef.current?.blur()}
+        />
+        {views.length === 0 && text.trim() === "" ? null : (
+          <div className="flex flex-wrap items-center gap-1">
+            {views.map((view, index) => (
+              <button
+                key={view.id}
+                type="button"
+                onClick={() => {
+                  setText(view.query);
+                  changeDisplay(view.display);
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  rpc.call("view_delete", { id: view.id }).then(
+                    (next) => setViews(next.views),
+                    () => undefined,
+                  );
+                }}
+                title={`${view.query}  (right-click to delete)`}
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-xs",
+                  view.query === text
+                    ? "bg-foreground text-background"
+                    : "bg-muted text-muted-foreground hover:text-foreground",
                 )}
-              </dt>
-              <dd className="min-w-0 flex-1">{action.label}</dd>
-            </div>
-          ))}
-        </dl>
-        <p className="mt-4 text-xs text-muted-foreground">
-          Change any of these in the plugin settings. Any key closes this.
-        </p>
+              >
+                <span className="mr-1 font-mono text-[10px] opacity-60">
+                  {index + 1}
+                </span>
+                {view.name}
+              </button>
+            ))}
+            {text.trim() === "" ? null : (
+              <button
+                type="button"
+                onClick={saveView}
+                className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+              >
+                + save view
+              </button>
+            )}
+          </div>
+        )}
       </div>
+      <ul className="flex min-h-0 flex-1 flex-col overflow-y-auto py-1">
+        {groups.map((group) => (
+          <div key={group.key}>
+            <li
+              role="button"
+              tabIndex={-1}
+              onClick={() => toggleFold(group.key)}
+              className="sticky top-0 z-10 mt-1 flex cursor-pointer select-none items-center gap-1.5 bg-[var(--sidebar,var(--background))] px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+            >
+              <Icon
+                name={folded.has(group.key) ? "ChevronRight" : "ChevronDown"}
+                className="size-3 shrink-0"
+                aria-hidden
+              />
+              {group.key.startsWith("p:") && group.rows[0] !== undefined ? (
+                <ProjectMark of={group.rows[0]} className="size-3.5" />
+              ) : null}
+              <span>{group.label}</span>
+              <span className="tabular-nums opacity-60">
+                {group.rows.length}
+              </span>
+            </li>
+            {(folded.has(group.key) ? [] : nestRows(group.rows)).map(
+              ({ row, depth }) => (
+                <ThreadRow
+                  key={row.threadId}
+                  row={row}
+                  selected={row.threadId === activeThreadId}
+                  // The sidebar never holds the caret: bb owns focus out here,
+                  // and drawing a focus ring we do not own would be a lie.
+                  active={false}
+                  showProject={!byProject}
+                  depth={depth}
+                  onSelect={() => open(row.threadId)}
+                  onOpen={() => open(row.threadId)}
+                />
+              ),
+            )}
+          </div>
+        ))}
+        {matching.length === 0 && extraHits.length === 0 ? (
+          <li className="px-3 py-6 text-center text-xs text-muted-foreground">
+            Nothing matches.
+          </li>
+        ) : null}
+        {extraHits.length === 0 ? null : (
+          <>
+            <li className="sticky top-0 z-10 mt-1 bg-[var(--sidebar,var(--background))] px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Also in the archive
+            </li>
+            {extraHits.map((hit) => (
+              <li key={hit.threadId}>
+                <button
+                  type="button"
+                  onClick={() => open(hit.threadId)}
+                  className="w-full px-3 py-2 text-left hover:bg-muted/50"
+                >
+                  <span className="block truncate text-sm text-muted-foreground">
+                    {hit.title}
+                  </span>
+                  {hit.snippet === "" ? null : (
+                    <span className="mt-0.5 block truncate text-xs text-muted-foreground/70">
+                      {hit.snippet}
+                    </span>
+                  )}
+                </button>
+              </li>
+            ))}
+          </>
+        )}
+      </ul>
     </div>
   );
-}
-
-/** True when the keystroke belongs to something the user is typing into. */
-function isTypingTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.isContentEditable) return true;
-  const tag = target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
 export default definePluginApp((app) => {
@@ -2156,11 +1676,32 @@ export default definePluginApp((app) => {
       "Project marks, saved views, and every key the Deck binds.",
     component: SettingsSection,
   });
-  app.slots.navPanel({
-    id: "deck",
+  // bb owns thread detail now, so Deck has no page of its own. Its commands
+  // live in bb's quick palette (Mod+Shift+P) instead of a keymap that would
+  // fight the host for focus in a sidebar the host owns.
+  app.slots.commandPaletteAction({
+    id: "cycle-grouping",
+    title: "Deck: cycle grouping",
+    run: () => cycleDisplay("groupBy"),
+  });
+  app.slots.commandPaletteAction({
+    id: "cycle-sorting",
+    title: "Deck: cycle sorting",
+    run: () => cycleDisplay("sortBy"),
+  });
+  app.slots.commandPaletteAction({
+    id: "unread-first",
+    title: "Deck: toggle unread first",
+    run: () => cycleDisplay("unreadFirst"),
+  });
+  // Exclusive slot: registering it makes Deck's rows the sidebar list while the
+  // plugin is enabled. bb owns the choice under Settings → Appearance, and
+  // falls back to its own list if this one is absent or throws.
+  app.slots.experimental_threadList({
+    id: "deck-threads",
     title: "Deck",
-    icon: "ListTodo",
-    path: "deck",
-    component: DeckPage,
+    description:
+      "Deck's rows: bb's own working and needs-you indicators, grouped the way the Deck page is grouped.",
+    component: SidebarList,
   });
 });

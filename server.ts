@@ -17,7 +17,13 @@ import type { Database } from "better-sqlite3";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { hueForSlot } from "./lib/project-visuals.ts";
-import { DEFAULT_DISPLAY, parseDisplay, type Display } from "./lib/display.ts";
+import {
+  DEFAULT_DISPLAY,
+  parseDisplay,
+  parseSession,
+  type Display,
+  type Session,
+} from "./lib/display.ts";
 import { resolveBindings, type Bindings } from "./lib/bindings.ts";
 import {
   ICON_CANDIDATES,
@@ -52,6 +58,10 @@ const displaySchema = z.object({
   groupBy: z.enum(["state", "project", "day", "none"]),
   sortBy: z.enum(["updated", "created", "alphabetical"]),
   unreadFirst: z.boolean(),
+});
+const sessionSchema = z.object({
+  query: z.string().max(200),
+  folded: z.array(z.string().max(120)).max(200),
 });
 const viewSchema = z.object({
   id: z.string(),
@@ -97,6 +107,8 @@ export const rpcContract = defineRpcContract({
       views: z.array(viewSchema),
       projects: z.array(projectSchema),
       display: displaySchema,
+      /** Where the list was left: the query and the folded groups. */
+      session: sessionSchema,
       /** Action id to chords. Anything missing falls back to the default. */
       bindings: z.record(z.string(), z.array(z.string())),
     }),
@@ -139,6 +151,10 @@ export const rpcContract = defineRpcContract({
   display_set: {
     input: displaySchema,
     output: displaySchema,
+  },
+  session_set: {
+    input: sessionSchema,
+    output: sessionSchema,
   },
   view_save: {
     input: z.object({
@@ -384,6 +400,15 @@ export default async function plugin(bb: BbPluginApi) {
     return parseDisplay(await bb.storage.kv.get("display"));
   }
 
+  /**
+   * Where the list was left — the query and the folded groups. Server-side for
+   * the same reason as the organisation: coming back to the deck should be
+   * coming back to what you were looking at, not to a box someone emptied.
+   */
+  async function readSession(): Promise<Session> {
+    return parseSession(await bb.storage.kv.get("session"));
+  }
+
   /** Key bindings, merged over the defaults so a partial map is fine. */
   async function readBindings(): Promise<Bindings> {
     return resolveBindings(await bb.storage.kv.get("bindings"));
@@ -624,6 +649,7 @@ export default async function plugin(bb: BbPluginApi) {
       views: listViews(),
       projects: await readProjects(),
       display: await readDisplay(),
+      session: await readSession(),
       bindings: await readBindings(),
     }),
 
@@ -638,6 +664,13 @@ export default async function plugin(bb: BbPluginApi) {
       await bb.storage.kv.set("display", next);
       // No realtime publish: the window that changed it already has it, and
       // republishing would make every other open deck jump under the user.
+      return next;
+    },
+
+    session_set: async (next) => {
+      await bb.storage.kv.set("session", next);
+      // Same reasoning as display_set, and more so: this one moves on every
+      // keystroke, and a second window retyping under you would be unusable.
       return next;
     },
 

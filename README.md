@@ -110,6 +110,15 @@ a chip to delete it. Nine of them, one per digit.
 A view saves the **layout** with the query. A view that restored your search but
 dropped you into someone else's grouping would be a bug waiting to happen.
 
+## Where you left it
+
+The deck comes back the way you left it: the grouping and sort, the text in the
+search box, and the groups you folded. All of it is kept server-side, so it
+follows you from the desktop app to a browser, and it survives bb mounting and
+unmounting the list as you move around. Nothing about it is a saved view — a
+saved view is a place you go back to on purpose, this is just not being made to
+retype your search every time you look at a thread.
+
 ## Keys
 
 You should never have to touch the mouse. Focus lives in one of two places,

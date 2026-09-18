@@ -9,6 +9,8 @@ import {
   dayBucket,
   groupRows,
   parseDisplay,
+  parseSession,
+  DEFAULT_SESSION,
   type Display,
   type Groupable,
 } from "./display.ts";
@@ -253,4 +255,23 @@ test("displayBranch keeps only the informative ones", () => {
   assert.equal(displayBranch("bb/thing-thr_abc", "thr_abc"), null);
   assert.equal(displayBranch("main", "thr_abc"), "main");
   assert.equal(displayBranch(null, "thr_abc"), null);
+});
+
+test("parseSession restores what was left behind", () => {
+  assert.deepEqual(parseSession({ query: "is:blocked", folded: ["3-done"] }), {
+    query: "is:blocked",
+    folded: ["3-done"],
+  });
+});
+
+test("parseSession falls back rather than throwing", () => {
+  assert.deepEqual(parseSession(null), DEFAULT_SESSION);
+  assert.deepEqual(parseSession("nope"), DEFAULT_SESSION);
+  assert.deepEqual(parseSession({}), DEFAULT_SESSION);
+  assert.deepEqual(parseSession({ query: 7, folded: "all" }), DEFAULT_SESSION);
+  // A half-written array loses only the entries that are not keys.
+  assert.deepEqual(parseSession({ query: "x", folded: ["a", 2, null] }), {
+    query: "x",
+    folded: ["a"],
+  });
 });

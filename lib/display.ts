@@ -22,6 +22,33 @@ export const DEFAULT_DISPLAY: Display = {
   unreadFirst: false,
 };
 
+/**
+ * Where you left the list, as opposed to how you like it organised. Kept apart
+ * from Display because a saved view pairs a query with a Display of its own,
+ * and folding the live query into that type would have every saved view carry
+ * a second, stale copy of it.
+ */
+export interface Session {
+  /** The text in the search box, in the same grammar the box accepts. */
+  query: string;
+  /** Group keys you collapsed. Keys not in the current grouping are ignored. */
+  folded: string[];
+}
+
+export const DEFAULT_SESSION: Session = { query: "", folded: [] };
+
+/** Parse anything persisted, falling back rather than throwing. */
+export function parseSession(value: unknown): Session {
+  if (typeof value !== "object" || value === null) return DEFAULT_SESSION;
+  const raw = value as Record<string, unknown>;
+  return {
+    query: typeof raw.query === "string" ? raw.query : "",
+    folded: Array.isArray(raw.folded)
+      ? raw.folded.filter((key): key is string => typeof key === "string")
+      : [],
+  };
+}
+
 export const GROUP_BY_LABEL: Record<GroupBy, string> = {
   state: "By state",
   project: "By project",
