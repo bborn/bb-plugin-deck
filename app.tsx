@@ -32,6 +32,7 @@ import {
   type PluginSidebarThreadIndicator,
   type PluginThreadListProps,
 } from "@get-bb/plugin-sdk/app";
+import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { toast } from "sonner";
 import type { Hit, Meta, Project, View, rpcContract } from "./server";
@@ -409,19 +410,20 @@ function useRows(
  * bb adds kinds over time and an older plugin has to degrade quietly rather
  * than throw.
  */
-const INDICATOR_ICON: Partial<Record<PluginSidebarThreadIndicator, IconName>> = {
-  "background-agent": "Bot",
-  "background-command": "Terminal",
-  workflow: "Workflow",
-  "plan-mode": "ListTodo",
-  goal: "Target",
-  "waiting-for-input": "MessageQuestion",
-  "unread-error": "AlertCircle",
-  "unread-success": "CircleCheck",
-  draft: "Edit",
-  "working-draft": "Edit",
-  runtime: "Loading",
-};
+const INDICATOR_ICON: Partial<Record<PluginSidebarThreadIndicator, IconName>> =
+  {
+    "background-agent": "Bot",
+    "background-command": "Terminal",
+    workflow: "Workflow",
+    "plan-mode": "ListTodo",
+    goal: "Target",
+    "waiting-for-input": "MessageQuestion",
+    "unread-error": "AlertCircle",
+    "unread-success": "CircleCheck",
+    draft: "Edit",
+    "working-draft": "Edit",
+    runtime: "Loading",
+  };
 
 /** Total live work on a thread; 0 means nothing is running. */
 function activityCount(activity: PluginSidebarThreadActivity): number {
@@ -491,7 +493,8 @@ function nestRows(rows: readonly Row[]): { row: Row; depth: number }[] {
     out.push({ row, depth });
     // Depth is capped for indent purposes by the renderer, not here: the tree
     // is whatever bb says it is.
-    for (const child of children.get(row.threadId) ?? []) walk(child, depth + 1);
+    for (const child of children.get(row.threadId) ?? [])
+      walk(child, depth + 1);
   };
   for (const root of roots) walk(root, 0);
   return out;
@@ -574,7 +577,10 @@ function ProjectMark({ of, className }: { of: Marked; className?: string }) {
         loading="eager"
         decoding="sync"
         onError={() => setBroken(true)}
-        className={cn("size-4 shrink-0 rounded-[3px] object-contain", className)}
+        className={cn(
+          "size-4 shrink-0 rounded-[3px] object-contain",
+          className,
+        )}
       />
     );
   }
@@ -626,7 +632,6 @@ function PullRequestBadge({ threadId }: { threadId: string }) {
  * context-menu primitive is not a dependency here.
  */
 function RowMenu({ row, canSplit }: { row: Row; canSplit: boolean }) {
-  const actions = useSidebarThreadActions();
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
@@ -645,51 +650,93 @@ function RowMenu({ row, canSplit }: { row: Row; canSplit: boolean }) {
           align="end"
           sideOffset={6}
           onClick={(event) => event.stopPropagation()}
-          className="z-50 min-w-48 rounded-lg border border-border bg-card p-1 shadow-md"
+          className={MENU_CONTENT}
         >
-          <DropdownMenu.Item
-            className={MENU_ITEM}
-            onSelect={() => actions.open(row.threadId)}
-          >
-            Open
-          </DropdownMenu.Item>
-          {canSplit ? (
-            <DropdownMenu.Item
-              className={MENU_ITEM}
-              onSelect={() => actions.open(row.threadId, { split: true })}
-            >
-              Open in a split
-            </DropdownMenu.Item>
-          ) : null}
-          <DropdownMenu.Separator className="my-1 h-px bg-border" />
-          <DropdownMenu.Item
-            className={MENU_ITEM}
-            onSelect={() => void actions.setPinned(row.threadId, !row.isPinned)}
-          >
-            {row.isPinned ? "Unpin" : "Pin"}
-          </DropdownMenu.Item>
-          <DropdownMenu.Item
-            className={MENU_ITEM}
-            onSelect={() => void actions.setRead(row.threadId, row.isUnread)}
-          >
-            {row.isUnread ? "Mark read" : "Mark unread"}
-          </DropdownMenu.Item>
-          <DropdownMenu.Separator className="my-1 h-px bg-border" />
-          <DropdownMenu.Item
-            className={MENU_ITEM}
-            onSelect={() => actions.archive(row.threadId)}
-          >
-            Archive
-          </DropdownMenu.Item>
-          <DropdownMenu.Item
-            className={cn(MENU_ITEM, "text-destructive")}
-            onSelect={() => actions.requestDelete(row.threadId)}
-          >
-            Delete…
-          </DropdownMenu.Item>
+          <ThreadMenuItems row={row} canSplit={canSplit} surface="dropdown" />
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  );
+}
+
+/**
+ * The same actions on the same thread, whichever way you asked for them: the
+ * row's own "…" button, or a right-click anywhere on the row the way bb's
+ * sidebar does it. Radix gives the two surfaces the same item API, so the list
+ * is written once and rendered with whichever primitives the caller opened —
+ * two copies would drift the moment either one gained an entry.
+ */
+function ThreadMenuItems({
+  row,
+  canSplit,
+  surface,
+}: {
+  row: Row;
+  canSplit: boolean;
+  surface: "dropdown" | "context";
+}) {
+  const actions = useSidebarThreadActions();
+  const M = surface === "context" ? ContextMenu : DropdownMenu;
+  const rename = () => {
+    const next = window.prompt("Rename this thread", row.title)?.trim();
+    // The host's rename is deliberately silent, so an empty answer here has to
+    // mean "leave it alone" rather than "call it nothing".
+    if (next === undefined || next === "" || next === row.title) return;
+    void actions.rename(row.threadId, next);
+  };
+  const copyLink = () => {
+    const link = `${window.location.origin}/projects/${row.projectId}/threads/${row.threadId}`;
+    navigator.clipboard.writeText(link).then(
+      () => toast.success("Thread link copied"),
+      () => toast.error("Failed to copy thread link"),
+    );
+  };
+  return (
+    <>
+      <M.Item className={MENU_ITEM} onSelect={() => actions.open(row.threadId)}>
+        Open
+      </M.Item>
+      {canSplit ? (
+        <M.Item
+          className={MENU_ITEM}
+          onSelect={() => actions.open(row.threadId, { split: true })}
+        >
+          Open in a split
+        </M.Item>
+      ) : null}
+      <M.Separator className={MENU_SEPARATOR} />
+      <M.Item className={MENU_ITEM} onSelect={copyLink}>
+        Copy thread link
+      </M.Item>
+      <M.Item
+        className={MENU_ITEM}
+        onSelect={() => void actions.setRead(row.threadId, row.isUnread)}
+      >
+        {row.isUnread ? "Mark read" : "Mark unread"}
+      </M.Item>
+      <M.Item
+        className={MENU_ITEM}
+        onSelect={() => void actions.setPinned(row.threadId, !row.isPinned)}
+      >
+        {row.isPinned ? "Unpin" : "Pin"}
+      </M.Item>
+      <M.Item className={MENU_ITEM} onSelect={rename}>
+        Rename…
+      </M.Item>
+      <M.Separator className={MENU_SEPARATOR} />
+      <M.Item
+        className={MENU_ITEM}
+        onSelect={() => actions.archive(row.threadId)}
+      >
+        Archive
+      </M.Item>
+      <M.Item
+        className={cn(MENU_ITEM, "text-destructive")}
+        onSelect={() => actions.requestDelete(row.threadId)}
+      >
+        Delete…
+      </M.Item>
+    </>
   );
 }
 
@@ -723,85 +770,104 @@ function ThreadRow({
   const split = useSidebarThreadSplit(row.threadId);
   return (
     <li>
-      <div
-        id={`row-${row.threadId}`}
-        role="option"
-        aria-selected={selected}
-        tabIndex={-1}
-        onClick={onSelect}
-        onDoubleClick={onOpen}
-        {...split.splitProps}
-        // Indent by nesting depth, capped so a long fork chain cannot push the
-        // title off the edge of a 300px column.
-        style={{ paddingLeft: `${0.75 + Math.min(depth, 4) * 0.875}rem` }}
-        className={cn(
-          "group/row cursor-pointer border-l-2 pr-2 py-2.5 text-sm",
-          selected
-            ? active
-              ? "border-foreground bg-muted"
-              : "border-transparent bg-muted/50"
-            : "border-transparent hover:bg-muted/50",
-        )}
-      >
-        <div className="flex items-center gap-2.5">
-          <ThreadMark row={row} />
-          <span
+      {/* Right-click anywhere on the row, the way bb's own sidebar answers it.
+          The trigger wraps the row rather than replacing it, so the click,
+          double-click and split gestures on the div below are untouched. */}
+      <ContextMenu.Root>
+        <ContextMenu.Trigger asChild>
+          <div
+            id={`row-${row.threadId}`}
+            role="option"
+            aria-selected={selected}
+            tabIndex={-1}
+            onClick={onSelect}
+            onDoubleClick={onOpen}
+            {...split.splitProps}
+            // Indent by nesting depth, capped so a long fork chain cannot push the
+            // title off the edge of a 300px column.
+            style={{ paddingLeft: `${0.75 + Math.min(depth, 4) * 0.875}rem` }}
             className={cn(
-              "min-w-0 flex-1 truncate",
-              // Read rows recede and unread rows stay bright. Bolding the
-              // unread ones alone was too small a difference to see.
-              row.isUnread
-                ? "font-semibold text-foreground"
-                : "text-muted-foreground",
+              "group/row cursor-pointer border-l-2 pr-2 py-2.5 text-sm",
+              selected
+                ? active
+                  ? "border-foreground bg-muted"
+                  : "border-transparent bg-muted/50"
+                : "border-transparent hover:bg-muted/50",
             )}
           >
-            {row.title}
-          </span>
-          {row.isPinned ? (
-            <Icon name="Pin" className="size-3 shrink-0 text-muted-foreground" />
-          ) : null}
-          <PullRequestBadge threadId={row.threadId} />
-          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-            {relativeTime(row.updatedAt)}
-          </span>
-          <RowMenu row={row} canSplit={split.isAvailable} />
-        </div>
-        {showProject || shownBranch !== null || row.tags.length > 0 ? (
-          <div className="mt-1.5 flex items-center gap-1.5 pl-[1.125rem] text-xs text-muted-foreground">
-            {showProject ? (
-              <>
-                <ProjectMark of={row} />
-                <span className="shrink-0">{row.projectName}</span>
-                {shownBranch === null ? null : <span aria-hidden>/</span>}
-              </>
-            ) : null}
-            {shownBranch === null ? null : (
-              <span className="truncate font-mono text-[11px]">
-                {shownBranch}
-              </span>
-            )}
-            {row.tags.map((tag) => (
+            <div className="flex items-center gap-2.5">
+              <ThreadMark row={row} />
               <span
-                key={tag}
-                className="shrink-0 rounded bg-muted px-1 text-[10px] leading-4"
+                className={cn(
+                  "min-w-0 flex-1 truncate",
+                  // Read rows recede and unread rows stay bright. Bolding the
+                  // unread ones alone was too small a difference to see.
+                  row.isUnread
+                    ? "font-semibold text-foreground"
+                    : "text-muted-foreground",
+                )}
               >
-                {tag}
+                {row.title}
               </span>
-            ))}
+              {row.isPinned ? (
+                <Icon
+                  name="Pin"
+                  className="size-3 shrink-0 text-muted-foreground"
+                />
+              ) : null}
+              <PullRequestBadge threadId={row.threadId} />
+              <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                {relativeTime(row.updatedAt)}
+              </span>
+              <RowMenu row={row} canSplit={split.isAvailable} />
+            </div>
+            {showProject || shownBranch !== null || row.tags.length > 0 ? (
+              <div className="mt-1.5 flex items-center gap-1.5 pl-[1.125rem] text-xs text-muted-foreground">
+                {showProject ? (
+                  <>
+                    <ProjectMark of={row} />
+                    <span className="shrink-0">{row.projectName}</span>
+                    {shownBranch === null ? null : <span aria-hidden>/</span>}
+                  </>
+                ) : null}
+                {shownBranch === null ? null : (
+                  <span className="truncate font-mono text-[11px]">
+                    {shownBranch}
+                  </span>
+                )}
+                {row.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="shrink-0 rounded bg-muted px-1 text-[10px] leading-4"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {row.blockedOn !== null ? (
+              <p className="mt-1.5 truncate pl-[1.125rem] text-xs text-muted-foreground">
+                <span className="text-destructive/80">Waiting on you</span>
+                {" · "}
+                {row.blockedOn}
+              </p>
+            ) : row.note !== null ? (
+              <p className="mt-1.5 truncate pl-[1.125rem] text-xs text-muted-foreground">
+                {row.note}
+              </p>
+            ) : null}
           </div>
-        ) : null}
-        {row.blockedOn !== null ? (
-          <p className="mt-1.5 truncate pl-[1.125rem] text-xs text-muted-foreground">
-            <span className="text-destructive/80">Waiting on you</span>
-            {" · "}
-            {row.blockedOn}
-          </p>
-        ) : row.note !== null ? (
-          <p className="mt-1.5 truncate pl-[1.125rem] text-xs text-muted-foreground">
-            {row.note}
-          </p>
-        ) : null}
-      </div>
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          <ContextMenu.Content className={MENU_CONTENT}>
+            <ThreadMenuItems
+              row={row}
+              canSplit={split.isAvailable}
+              surface="context"
+            />
+          </ContextMenu.Content>
+        </ContextMenu.Portal>
+      </ContextMenu.Root>
     </li>
   );
 }
@@ -931,6 +997,9 @@ function SearchBar({
 
 const MENU_ITEM =
   "flex cursor-pointer items-center justify-between gap-6 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-muted";
+const MENU_CONTENT =
+  "z-50 min-w-48 rounded-lg border border-border bg-card p-1 shadow-md";
+const MENU_SEPARATOR = "my-1 h-px bg-border";
 
 /**
  * Organize and Sort by, in bb's own sidebar wording so the two surfaces do not
@@ -945,7 +1014,11 @@ function DisplayMenu({
   onChange: (next: Display) => void;
 }) {
   const check = (on: boolean) =>
-    on ? <Icon name="Check" className="size-3.5" /> : <span className="size-3.5" />;
+    on ? (
+      <Icon name="Check" className="size-3.5" />
+    ) : (
+      <span className="size-3.5" />
+    );
 
   return (
     <DropdownMenu.Root>
@@ -1380,7 +1453,6 @@ function SettingsSection() {
   );
 }
 
-
 /**
  * Deck's rows in bb's sidebar.
  *
@@ -1436,10 +1508,7 @@ function SidebarList({ activeThreadId, onNavigate }: PluginThreadListProps) {
     () => projects.map((project) => project.name),
     [projects],
   );
-  const folded = useMemo(
-    () => new Set(session.folded),
-    [session.folded],
-  );
+  const folded = useMemo(() => new Set(session.folded), [session.folded]);
   const toggleFold = useCallback(
     (key: string) => {
       const next = new Set(session.folded);
@@ -1672,8 +1741,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "settings",
     title: "Deck",
-    description:
-      "Project marks, saved views, and every key the Deck binds.",
+    description: "Project marks, saved views, and every key the Deck binds.",
     component: SettingsSection,
   });
   // bb owns thread detail now, so Deck has no page of its own. Its commands
